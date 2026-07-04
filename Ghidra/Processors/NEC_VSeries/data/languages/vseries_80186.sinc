@@ -1,0 +1,76 @@
+# ==========================================================================
+#  NEC V-Series - 80186 instruction additions
+# --------------------------------------------------------------------------
+#  Instructions the V-Series inherits from the 80186 over the base 8086,
+#  using the NEC mnemonics as primary (Intel alias in a comment):
+#    PREPARE=ENTER  DISPOSE=LEAVE  PUSH R=PUSHA  POP R=POPA  PUSH imm
+#    MUL(3-op)=IMUL  shift/rotate by imm8 (C0/C1)  INM=INS  OUTM=OUTS
+#    CHKIND=BOUND
+#
+#  Depends on the tokens, registers and macros defined in
+#  vseries_registers.sinc / vseries_tokens.sinc / vseries_8086.sinc, which
+#  must be @included before this file.
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+#  Stack frame / register block / immediate push
+# --------------------------------------------------------------------------
+:PREPARE imm16,imm8 is byte=0xc8; imm16; imm8 {   # ENTER; nesting level>0 not modeled (TODO)
+  push16(BP);
+  local frame:2 = SP;
+  BP = frame;
+  SP = SP - imm16;
+}
+:DISPOSE is byte=0xc9 { SP = BP; pop16(BP); }      # LEAVE
+:PUSH^" R"  is byte=0x60 {                            # PUSHA
+  local sp0:2 = SP;
+  push16(AW); push16(CW); push16(DW); push16(BW);
+  push16(sp0); push16(BP); push16(IX); push16(IY);
+}
+:POP^" R"   is byte=0x61 {                            # POPA
+  pop16(IY); pop16(IX); pop16(BP); SP = SP + 2;
+  pop16(BW); pop16(DW); pop16(CW); pop16(AW);
+}
+:PUSH imm16 is byte=0x68; imm16 { push16(imm16); }
+:PUSH simm8_16 is byte=0x6a; simm8_16 { push16(simm8_16); }
+
+# --------------------------------------------------------------------------
+#  3-operand signed multiply  (NEC MUL, Intel IMUL)
+# --------------------------------------------------------------------------
+:MUL Reg16,rm16,simm8_16 is byte=0x6b; rm16 & Reg16 ... ; simm8_16 {
+  local r:4 = sext(rm16) * sext(simm8_16);  Reg16 = r:2;  CY = sext(Reg16) != r;  V = CY;
+}
+:MUL Reg16,rm16,imm16 is byte=0x69; rm16 & Reg16 ... ; imm16 {
+  local r:4 = sext(rm16) * sext(imm16:2);  Reg16 = r:2;  CY = sext(Reg16) != r;  V = CY;
+}
+
+# --------------------------------------------------------------------------
+#  Shift / rotate by imm8  (C0 / C1)
+# --------------------------------------------------------------------------
+:ROL rm8,imm8  is byte=0xc0; rm8 & reg_opcode=0 ... ; imm8 { local n = imm8 & 0x7; rm8 = (rm8 << n) | (rm8 >> (8 - n)); CY = (rm8 & 1)!=0; }
+:ROL rm16,imm8 is byte=0xc1; rm16 & reg_opcode=0 ... ; imm8 { local n:1 = imm8 & 0xf; rm16 = (rm16 << n) | (rm16 >> (16 - n)); CY = (rm16 & 1)!=0; }
+:ROR rm8,imm8  is byte=0xc0; rm8 & reg_opcode=1 ... ; imm8 { local n = imm8 & 0x7; rm8 = (rm8 >> n) | (rm8 << (8 - n)); CY = (rm8 s< 0); }
+:ROR rm16,imm8 is byte=0xc1; rm16 & reg_opcode=1 ... ; imm8 { local n:1 = imm8 & 0xf; rm16 = (rm16 >> n) | (rm16 << (16 - n)); CY = (rm16 s< 0); }
+:ROLC rm8,imm8  is byte=0xc0; rm8 & reg_opcode=2 ... ; imm8 { local n = (imm8 & 0x1f) % 9; local t:2 = (zext(CY) << 8) | zext(rm8); t = (t << n) | (t >> (9 - n)); rm8 = t:1; CY = (t & 0x100)!=0; }
+:ROLC rm16,imm8 is byte=0xc1; rm16 & reg_opcode=2 ... ; imm8 { local n:1 = (imm8 & 0x1f) % 17; local t:4 = (zext(CY) << 16) | zext(rm16); t = (t << n) | (t >> (17 - n)); rm16 = t:2; CY = (t & 0x10000)!=0; }
+:RORC rm8,imm8  is byte=0xc0; rm8 & reg_opcode=3 ... ; imm8 { local n = (imm8 & 0x1f) % 9; local t:2 = (zext(CY) << 8) | zext(rm8); t = (t >> n) | (t << (9 - n)); rm8 = t:1; CY = (t & 0x100)!=0; }
+:RORC rm16,imm8 is byte=0xc1; rm16 & reg_opcode=3 ... ; imm8 { local n:1 = (imm8 & 0x1f) % 17; local t:4 = (zext(CY) << 16) | zext(rm16); t = (t >> n) | (t << (17 - n)); rm16 = t:2; CY = (t & 0x10000)!=0; }
+:SHL rm8,imm8  is byte=0xc0; rm8 & (reg_opcode=4 | reg_opcode=6) ... ; imm8 { local n = imm8 & 0x1f; local t:1 = rm8; rm8 = rm8 << n; CY = (n!=0) && (((t >> (8-n)) & 1)!=0); setResultFlags(rm8); }
+:SHL rm16,imm8 is byte=0xc1; rm16 & (reg_opcode=4 | reg_opcode=6) ... ; imm8 { local n:1 = imm8 & 0x1f; local t:2 = rm16; rm16 = rm16 << n; CY = (n!=0) && (((t >> (16-n)) & 1)!=0); setResultFlags(rm16); }
+:SHR rm8,imm8  is byte=0xc0; rm8 & reg_opcode=5 ... ; imm8 { local n = imm8 & 0x1f; local t:1 = rm8; rm8 = rm8 >> n; CY = (n!=0) && (((t >> (n-1)) & 1)!=0); setResultFlags(rm8); }
+:SHR rm16,imm8 is byte=0xc1; rm16 & reg_opcode=5 ... ; imm8 { local n:1 = imm8 & 0x1f; local t:2 = rm16; rm16 = rm16 >> n; CY = (n!=0) && (((t >> (n-1)) & 1)!=0); setResultFlags(rm16); }
+:SHRA rm8,imm8  is byte=0xc0; rm8 & reg_opcode=7 ... ; imm8 { local n = imm8 & 0x1f; local t:1 = rm8; rm8 = rm8 s>> n; CY = (n!=0) && (((t s>> (n-1)) & 1)!=0); setResultFlags(rm8); }
+:SHRA rm16,imm8 is byte=0xc1; rm16 & reg_opcode=7 ... ; imm8 { local n:1 = imm8 & 0x1f; local t:2 = rm16; rm16 = rm16 s>> n; CY = (n!=0) && (((t s>> (n-1)) & 1)!=0); setResultFlags(rm16); }
+
+# --------------------------------------------------------------------------
+#  Block I/O  INM / OUTM  (Intel: INS / OUTS)
+# --------------------------------------------------------------------------
+:INM eseDI1,DW is byte=0x6c & eseDI1 & DW { eseDI1 = *[io]:1 DW; }
+:INM eseDI2,DW is byte=0x6d & eseDI2 & DW { eseDI2 = *[io]:2 DW; }
+:OUTM DW,dseSI1 is byte=0x6e & dseSI1 & DW { *[io]:1 DW = dseSI1; }
+:OUTM DW,dseSI2 is byte=0x6f & dseSI2 & DW { *[io]:2 DW = dseSI2; }
+
+# --------------------------------------------------------------------------
+#  CHKIND  (Intel: BOUND)
+# --------------------------------------------------------------------------
+:CHKIND Reg16,addr16 is byte=0x62; addr16 & Reg16 ... { bound_check(Reg16, addr16); }   # BOUND

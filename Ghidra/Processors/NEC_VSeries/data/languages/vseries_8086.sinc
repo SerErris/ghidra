@@ -1,0 +1,603 @@
+# ==========================================================================
+#  NEC V-Series - 8086 base instruction set
+# --------------------------------------------------------------------------
+#  All standard 8086/8088 instructions, decoded with the NEC V-Series
+#  mnemonics as primary (the Intel/8086 alias is noted in a comment on each
+#  group).  Register names follow the standard 8086 model (AW/BW/.../PS/DS0/
+#  DS1/SS) per the module design.  Semantics/flags reference the 1991 NEC
+#  16-Bit V-Series Data Book and "Programming the 8086/8088"; encodings are
+#  cross-checked against V50_instructions.json.
+#
+#  NEC vs Intel mnemonic map used below:
+#    ADDC=ADC  SUBC=SBB  MULU=MUL  MUL=IMUL  DIVU=DIV  DIV=IDIV
+#    SHRA=SAR  ROLC=RCL  RORC=RCR  BR=JMP    Bcc=Jcc   CALL=CALL RET=RET
+#    BRK=INT   BRKV=INTO RETI=IRET DBNZ=LOOP DBNZE=LOOPE DBNZNE=LOOPNE
+#    BCWZ=JCXZ MOVBK=MOVS CMPBK=CMPS CMPM=SCAS LDM=LODS STM=STOS
+#    LDEA=LEA  TRANS=XLAT XCH=XCHG  CVTBW=CBW CVTWL=CWD CVTBD=AAM CVTDB=AAD
+#    ADJBA=AAA ADJ4A=DAA  ADJBS=AAS ADJ4S=DAS PREPARE=ENTER DISPOSE=LEAVE
+#    CHKIND=BOUND INM=INS OUTM=OUTS HALT=HLT POLL=WAIT IY=CLI EI=STI
+#    BUSLOCK=LOCK  MOV DS0=LES  MOV DS1=LDS
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+#  User-defined p-code operations (complex / out-of-scope semantics)
+# --------------------------------------------------------------------------
+define pcodeop halt;            # HALT: stop until interrupt/reset
+define pcodeop poll;            # POLL: wait for coprocessor ready
+define pcodeop fpu_op;          # FPO1/FPO2 (coprocessor escape) - no FPU modeled
+define pcodeop bound_check;     # CHKIND (BOUND): array index bounds trap
+# BCD adjust helpers - full semantics are a TODO; modeled as black boxes that
+# operate on AW and the flags (data-flow through AL/AH/CY/AC is not modeled).
+define pcodeop adjustBCDAddition;       # ADJ4A (DAA)
+define pcodeop adjustBCDSubtraction;    # ADJ4S (DAS)
+define pcodeop adjustASCIIAddition;     # ADJBA (AAA)
+define pcodeop adjustASCIISubtraction;  # ADJBS (AAS)
+
+# --------------------------------------------------------------------------
+#  Flag-handling macros
+# --------------------------------------------------------------------------
+macro setResultFlags(result) {
+  S = result s< 0;
+  Z = result == 0;
+  P = (popcount(result & 0xff) & 1:1) == 0;
+}
+
+macro setLogicalFlags(result) {
+  CY = 0;
+  V = 0;
+  setResultFlags(result);
+  # AC is undefined after logical ops
+}
+
+# Pack/unpack the 8086 PSW word.  Bit layout: CF0 -1 PF2 -3 AF4 -5 ZF6 SF7
+# TF8 IF9 DF10 OF11; on the 8086 bits 12-15 and bit 1 read back as 1.
+macro packFlags(dst) {
+  dst = 0xf002
+      | zext(CY)        | (zext(P) << 2)  | (zext(AC) << 4)  | (zext(Z) << 6)
+      | (zext(S) << 7) | (zext(BRK) << 8)  | (zext(IE) << 9)  | (zext(DIR) << 10)
+      | (zext(V) << 11);
+}
+
+macro unpackFlags(src) {
+  CY = (src & 0x0001) != 0;
+  P = (src & 0x0004) != 0;
+  AC = (src & 0x0010) != 0;
+  Z = (src & 0x0040) != 0;
+  S = (src & 0x0080) != 0;
+  BRK = (src & 0x0100) != 0;
+  IE = (src & 0x0200) != 0;
+  DIR = (src & 0x0400) != 0;
+  V = (src & 0x0800) != 0;
+}
+
+# --------------------------------------------------------------------------
+#  16-bit real-mode stack macros (SS:SP)
+# --------------------------------------------------------------------------
+macro push16(val) {
+  local v:2 = val;
+  SP = SP - 2;
+  local p:4 = segment(SS,SP);
+  *:2 p = v;
+}
+
+macro pop16(dst) {
+  local p:4 = segment(SS,SP);
+  dst = *:2 p;
+  SP = SP + 2;
+}
+
+# --------------------------------------------------------------------------
+#  Arithmetic / logic operation macros (dst is register or memory r/m)
+# --------------------------------------------------------------------------
+macro doADD(dst,src) {
+  local r = dst + src;
+  CY = carry(dst,src);  V = scarry(dst,src);  AC = ((dst ^ src ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doADC8(dst,src) {
+  local ci:1 = CY;  local r = dst + src + ci;
+  CY = carry(dst,src) || carry(dst+src, ci);
+  V = scarry(dst,src) ^^ scarry(dst+src, ci);
+  AC = ((dst ^ src ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doADC16(dst,src) {
+  local ci:2 = zext(CY);  local r = dst + src + ci;
+  CY = carry(dst,src) || carry(dst+src, ci);
+  V = scarry(dst,src) ^^ scarry(dst+src, ci);
+  AC = ((dst ^ src ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doSUB(dst,src) {
+  local r = dst - src;
+  CY = dst < src;  V = sborrow(dst,src);  AC = ((dst ^ src ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doSBB8(dst,src) {
+  local ci:1 = CY;  local r = dst - src - ci;
+  CY = (dst < src) || ((dst - src) < ci);
+  V = sborrow(dst,src) ^^ sborrow(dst-src, ci);
+  AC = ((dst ^ src ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doSBB16(dst,src) {
+  local ci:2 = zext(CY);  local r = dst - src - ci;
+  CY = (dst < src) || ((dst - src) < ci);
+  V = sborrow(dst,src) ^^ sborrow(dst-src, ci);
+  AC = ((dst ^ src ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doCMP(a,b) {
+  local r = a - b;
+  CY = a < b;  V = sborrow(a,b);  AC = ((a ^ b ^ r) & 0x10) != 0;
+  setResultFlags(r);
+}
+macro doAND(dst,src) { dst = dst & src;  setLogicalFlags(dst); }
+macro doOR(dst,src)  { dst = dst | src;  setLogicalFlags(dst); }
+macro doXOR(dst,src) { dst = dst ^ src;  setLogicalFlags(dst); }
+macro doTEST(a,b)    { local r = a & b;  setLogicalFlags(r); }
+macro doINC(dst) {
+  local r = dst + 1;
+  V = scarry(dst,1);  AC = ((dst ^ 1 ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doDEC(dst) {
+  local r = dst - 1;
+  V = sborrow(dst,1);  AC = ((dst ^ 1 ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+macro doNEG(dst) {
+  CY = dst != 0;  V = sborrow(0,dst);
+  local r = -dst;  AC = ((dst ^ r) & 0x10) != 0;
+  dst = r;  setResultFlags(r);
+}
+
+# ==========================================================================
+#  Prefixes  (segment override, repeat, bus-lock).
+#  Each is a local context change scoped to the single following instruction.
+# ==========================================================================
+:^instruction is over=0x2e; instruction [ segover=1; ] { }   # PS:  (Intel CS override)
+:^instruction is over=0x36; instruction [ segover=2; ] { }   # SS:
+:^instruction is over=0x3e; instruction [ segover=3; ] { }   # DS0: (Intel DS override)
+:^instruction is over=0x26; instruction [ segover=4; ] { }   # DS1: (Intel ES override)
+:^instruction is over=0x64; instruction [ repnc=1;  ] { }    # REPNC (V-Series)
+:^instruction is over=0x65; instruction [ repc=1;   ] { }    # REPC  (V-Series)
+:^instruction is over=0xf2; instruction [ repne=1; rep=0; ] { }  # REPNE/REPNZ
+:^instruction is over=0xf3; instruction [ rep=1; repne=0; ] { }  # REP/REPE/REPZ
+:^instruction is over=0xf0; instruction [ lockprefx=1; ] { }     # BUSLOCK (LOCK)
+
+# ==========================================================================
+#  Branch-target and far-pointer operands
+# ==========================================================================
+#  Near relative branches add the displacement to the 16-bit offset only; the
+#  result wraps within the 64K code segment (the segment base is unchanged).
+#  We model that by wrapping the low 16 bits of the linear address and keeping
+#  the segment-page bits: ((inst_next>>16)<<16) | ((inst_next+disp) & 0xFFFF).
+#  This is exact for 64K-aligned segments (PS=X000); for other paragraph
+#  segments the wrap boundary is approximate, because the true segment base is
+#  not available at decode time (same limitation as x86-16-real).
+rel8:  reloc is simm8   [ reloc = ((inst_next >> 16) << 16) | ((inst_next + simm8) & 0xFFFF); ]  { export *[ram]:4 reloc; }
+rel16: reloc is simm16  [ reloc = ((inst_next >> 16) << 16) | ((inst_next + simm16) & 0xFFFF); ] { export *[ram]:4 reloc; }
+
+# Far pointer  offset:segment  (offset word first, then segment word).  The
+# physical target is masked to 20 bits: the V-Series has a 20-bit address bus,
+# so (segment<<4)+offset wraps at 1M (e.g. FFFF:0020 -> phys 0x00010).
+farptr: reloc is imm16 ; j16  [ reloc = (j16 * 0x10 + imm16) & 0xFFFFF; ]  { PS = j16; export *[ram]:4 reloc; }
+
+# Direct-addressed accumulator memory operand (moffs), segment default DS0.
+moffs8:  seg16^"[" imm16 "]"  is seg16 & imm16  { local p:4 = segment(seg16, imm16:2); export *:1 p; }
+moffs16: seg16^"[" imm16 "]"  is seg16 & imm16  { local p:4 = segment(seg16, imm16:2); export *:2 p; }
+
+# ==========================================================================
+#  String source/destination operands (auto-increment/decrement by DIR).
+#  Source uses DS0:IX (override-able); destination always uses DS1:IY.
+# ==========================================================================
+dseSI1: seg16^"[IX]"  is seg16    { local p:4 = segment(seg16,IX); IX = IX + 1 - 2*zext(DIR); export *:1 p; }
+dseSI2: seg16^"[IX]"  is seg16    { local p:4 = segment(seg16,IX); IX = IX + 2 - 4*zext(DIR); export *:2 p; }
+eseDI1: "DS1:[IY]"     is epsilon  { local p:4 = segment(DS1,IY); IY = IY + 1 - 2*zext(DIR); export *:1 p; }
+eseDI2: "DS1:[IY]"     is epsilon  { local p:4 = segment(DS1,IY); IY = IY + 2 - 4*zext(DIR); export *:2 p; }
+
+# Repeat-prefix helpers.  "rep"/"reptail" implement the CW-counted repeat used
+# by MOVBK/STM/LDM; "repe"/"repetail" add the Z condition used by CMPBK/CMPM.
+repPfx:          is rep=0 & repne=0 { }
+repPfx: ".rep"   is rep=1           { if (CW==0) goto inst_next; CW = CW - 1; }
+repPfx: ".repne" is rep=0 & repne=1 { if (CW==0) goto inst_next; CW = CW - 1; }
+repEnd:      is rep=0 & repne=0 { }
+repEnd:      is rep=1           { goto inst_start; }
+repEnd:      is rep=0 & repne=1 { goto inst_start; }
+
+repePfx:          is rep=0 & repne=0 { }
+repePfx: ".repe"  is rep=1           { if (CW==0) goto inst_next; CW = CW - 1; }
+repePfx: ".repne" is rep=0 & repne=1 { if (CW==0) goto inst_next; CW = CW - 1; }
+repeEnd:      is rep=0 & repne=0 { }
+repeEnd:      is rep=1           { if (Z!=0) goto inst_start; }   # REPE: repeat while equal
+repeEnd:      is rep=0 & repne=1 { if (Z==0) goto inst_start; }   # REPNE: repeat while not equal
+
+# ==========================================================================
+#  Data transfer - MOV  (Intel: MOV)
+# ==========================================================================
+:MOV rm8,Reg8    is byte=0x88; rm8 & Reg8 ...    { rm8 = Reg8; }
+:MOV rm16,Reg16  is byte=0x89; rm16 & Reg16 ...  { rm16 = Reg16; }
+:MOV Reg8,rm8    is byte=0x8a; rm8 & Reg8 ...    { Reg8 = rm8; }
+:MOV Reg16,rm16  is byte=0x8b; rm16 & Reg16 ...  { Reg16 = rm16; }
+:MOV rm8,imm8    is byte=0xc6; rm8 & reg_opcode=0 ... ; imm8   { rm8 = imm8; }
+:MOV rm16,imm16  is byte=0xc7; rm16 & reg_opcode=0 ... ; imm16 { rm16 = imm16; }
+:MOV reg8_op,imm8   is hinyb=0xb & page=0 & reg8_op; imm8   { reg8_op = imm8; }
+:MOV reg16_op,imm16 is hinyb=0xb & page=1 & reg16_op; imm16 { reg16_op = imm16; }
+:MOV AL,moffs8   is byte=0xa0; moffs8 & AL   { AL = moffs8; }
+:MOV AW,moffs16  is byte=0xa1; moffs16 & AW  { AW = moffs16; }
+:MOV moffs8,AL   is byte=0xa2; moffs8 & AL   { moffs8 = AL; }
+:MOV moffs16,AW  is byte=0xa3; moffs16 & AW  { moffs16 = AW; }
+:MOV rm16,SegReg is byte=0x8c; rm16 & SegReg ... { rm16 = SegReg; }
+:MOV SegReg,rm16 is byte=0x8e; rm16 & SegReg ... { SegReg = rm16; }
+
+# LDEA (LEA) - load effective address (offset only, no segment)
+:LDEA Reg16,addr16 is byte=0x8d; addr16 & Reg16 ... { Reg16 = addr16; }
+
+# MOV DS1 / MOV DS0 (Intel: LDS / LES) - load 32-bit far pointer.
+# Note: the pointer's segment word is read via DS0; segment override on the
+# operand is not modeled here (a documented milestone-1 limitation).
+:MOV "DS0",Reg16,addr16 is byte=0xc5; addr16 & Reg16 ... {   # LDS
+  local base:4 = segment(DS0, addr16);
+  Reg16 = *:2 base;
+  DS0 = *:2 (base + 2);
+}
+:MOV "DS1",Reg16,addr16 is byte=0xc4; addr16 & Reg16 ... {   # LES
+  local base:4 = segment(DS0, addr16);
+  Reg16 = *:2 base;
+  DS1 = *:2 (base + 2);
+}
+
+# MOV AH,PSW / MOV PSW,AH  (Intel: LAHF / SAHF)
+:MOV "AH,PSW" is byte=0x9f { local f:2; packFlags(f); AH = f:1; }
+:MOV "PSW,AH" is byte=0x9e {
+  CY = (AH & 0x01) != 0;  P = (AH & 0x04) != 0;  AC = (AH & 0x10) != 0;
+  Z = (AH & 0x40) != 0;  S = (AH & 0x80) != 0;
+}
+
+# TRANS (XLAT) : AL = DS0:[BW + AL]
+:TRANS is byte=0xd7 { local p:4 = segment(DS0, BW + zext(AL)); AL = *:1 p; }
+
+# XCH (XCHG)
+:XCH rm8,Reg8   is byte=0x86; rm8 & Reg8 ...   { local t:1 = rm8; rm8 = Reg8; Reg8 = t; }
+:XCH rm16,Reg16 is byte=0x87; rm16 & Reg16 ... { local t:2 = rm16; rm16 = Reg16; Reg16 = t; }
+:XCH "AW",reg16_op is hinyb=9 & page=0 & reg16_op { local t:2 = AW; AW = reg16_op; reg16_op = t; }
+
+# ==========================================================================
+#  Stack - PUSH / POP  (Intel: PUSH / POP)
+# ==========================================================================
+:PUSH reg16_op is hinyb=5 & page=0 & reg16_op { push16(reg16_op); }   # 50-57
+:POP  reg16_op is hinyb=5 & page=1 & reg16_op { pop16(reg16_op); }    # 58-5F
+:PUSH rm16     is byte=0xff; rm16 & reg_opcode=6 ... { push16(rm16); }
+:POP  rm16     is byte=0x8f; rm16 & reg_opcode=0 ... { pop16(rm16); }
+:PUSH sreg_op  is (byte=0x06 | byte=0x0e | byte=0x16 | byte=0x1e) & sreg_op { push16(sreg_op); }     # 06/0E/16/1E
+:POP  sreg_op  is (byte=0x07 | byte=0x17 | byte=0x1f) & sreg_op { pop16(sreg_op); }      # 07/17/1F  (no POP PS)
+:PUSH "PSW" is byte=0x9c { local f:2; packFlags(f); push16(f); }     # PUSHF
+:POP  "PSW" is byte=0x9d { local f:2; pop16(f); unpackFlags(f); }    # POPF
+
+# ==========================================================================
+#  Arithmetic  ADD/ADDC/SUB/SUBC/CMP  (Intel: ADD/ADC/SUB/SBB/CMP)
+# ==========================================================================
+:ADD rm8,Reg8   is byte=0x00; rm8 & Reg8 ...   { doADD(rm8,Reg8); }
+:ADD rm16,Reg16 is byte=0x01; rm16 & Reg16 ... { doADD(rm16,Reg16); }
+:ADD Reg8,rm8   is byte=0x02; rm8 & Reg8 ...   { doADD(Reg8,rm8); }
+:ADD Reg16,rm16 is byte=0x03; rm16 & Reg16 ... { doADD(Reg16,rm16); }
+:ADD AL,imm8    is byte=0x04; AL & imm8        { doADD(AL,imm8); }
+:ADD AW,imm16   is byte=0x05; AW & imm16       { doADD(AW,imm16); }
+
+:ADDC rm8,Reg8   is byte=0x10; rm8 & Reg8 ...   { doADC8(rm8,Reg8); }
+:ADDC rm16,Reg16 is byte=0x11; rm16 & Reg16 ... { doADC16(rm16,Reg16); }
+:ADDC Reg8,rm8   is byte=0x12; rm8 & Reg8 ...   { doADC8(Reg8,rm8); }
+:ADDC Reg16,rm16 is byte=0x13; rm16 & Reg16 ... { doADC16(Reg16,rm16); }
+:ADDC AL,imm8    is byte=0x14; AL & imm8        { doADC8(AL,imm8); }
+:ADDC AW,imm16   is byte=0x15; AW & imm16       { doADC16(AW,imm16); }
+
+:SUB rm8,Reg8   is byte=0x28; rm8 & Reg8 ...   { doSUB(rm8,Reg8); }
+:SUB rm16,Reg16 is byte=0x29; rm16 & Reg16 ... { doSUB(rm16,Reg16); }
+:SUB Reg8,rm8   is byte=0x2a; rm8 & Reg8 ...   { doSUB(Reg8,rm8); }
+:SUB Reg16,rm16 is byte=0x2b; rm16 & Reg16 ... { doSUB(Reg16,rm16); }
+:SUB AL,imm8    is byte=0x2c; AL & imm8        { doSUB(AL,imm8); }
+:SUB AW,imm16   is byte=0x2d; AW & imm16       { doSUB(AW,imm16); }
+
+:SUBC rm8,Reg8   is byte=0x18; rm8 & Reg8 ...   { doSBB8(rm8,Reg8); }
+:SUBC rm16,Reg16 is byte=0x19; rm16 & Reg16 ... { doSBB16(rm16,Reg16); }
+:SUBC Reg8,rm8   is byte=0x1a; rm8 & Reg8 ...   { doSBB8(Reg8,rm8); }
+:SUBC Reg16,rm16 is byte=0x1b; rm16 & Reg16 ... { doSBB16(Reg16,rm16); }
+:SUBC AL,imm8    is byte=0x1c; AL & imm8        { doSBB8(AL,imm8); }
+:SUBC AW,imm16   is byte=0x1d; AW & imm16       { doSBB16(AW,imm16); }
+
+:CMP rm8,Reg8   is byte=0x38; rm8 & Reg8 ...   { doCMP(rm8,Reg8); }
+:CMP rm16,Reg16 is byte=0x39; rm16 & Reg16 ... { doCMP(rm16,Reg16); }
+:CMP Reg8,rm8   is byte=0x3a; rm8 & Reg8 ...   { doCMP(Reg8,rm8); }
+:CMP Reg16,rm16 is byte=0x3b; rm16 & Reg16 ... { doCMP(Reg16,rm16); }
+:CMP AL,imm8    is byte=0x3c; AL & imm8        { doCMP(AL,imm8); }
+:CMP AW,imm16   is byte=0x3d; AW & imm16       { doCMP(AW,imm16); }
+
+# ==========================================================================
+#  Logical  AND/OR/XOR/TEST  (Intel: same)
+# ==========================================================================
+:AND rm8,Reg8   is byte=0x20; rm8 & Reg8 ...   { doAND(rm8,Reg8); }
+:AND rm16,Reg16 is byte=0x21; rm16 & Reg16 ... { doAND(rm16,Reg16); }
+:AND Reg8,rm8   is byte=0x22; rm8 & Reg8 ...   { doAND(Reg8,rm8); }
+:AND Reg16,rm16 is byte=0x23; rm16 & Reg16 ... { doAND(Reg16,rm16); }
+:AND AL,imm8    is byte=0x24; AL & imm8        { doAND(AL,imm8); }
+:AND AW,imm16   is byte=0x25; AW & imm16       { doAND(AW,imm16); }
+
+:OR rm8,Reg8   is byte=0x08; rm8 & Reg8 ...   { doOR(rm8,Reg8); }
+:OR rm16,Reg16 is byte=0x09; rm16 & Reg16 ... { doOR(rm16,Reg16); }
+:OR Reg8,rm8   is byte=0x0a; rm8 & Reg8 ...   { doOR(Reg8,rm8); }
+:OR Reg16,rm16 is byte=0x0b; rm16 & Reg16 ... { doOR(Reg16,rm16); }
+:OR AL,imm8    is byte=0x0c; AL & imm8        { doOR(AL,imm8); }
+:OR AW,imm16   is byte=0x0d; AW & imm16       { doOR(AW,imm16); }
+
+:XOR rm8,Reg8   is byte=0x30; rm8 & Reg8 ...   { doXOR(rm8,Reg8); }
+:XOR rm16,Reg16 is byte=0x31; rm16 & Reg16 ... { doXOR(rm16,Reg16); }
+:XOR Reg8,rm8   is byte=0x32; rm8 & Reg8 ...   { doXOR(Reg8,rm8); }
+:XOR Reg16,rm16 is byte=0x33; rm16 & Reg16 ... { doXOR(Reg16,rm16); }
+:XOR AL,imm8    is byte=0x34; AL & imm8        { doXOR(AL,imm8); }
+:XOR AW,imm16   is byte=0x35; AW & imm16       { doXOR(AW,imm16); }
+
+:TEST rm8,Reg8   is byte=0x84; rm8 & Reg8 ...   { doTEST(rm8,Reg8); }
+:TEST rm16,Reg16 is byte=0x85; rm16 & Reg16 ... { doTEST(rm16,Reg16); }
+:TEST AL,imm8    is byte=0xa8; AL & imm8        { doTEST(AL,imm8); }
+:TEST AW,imm16   is byte=0xa9; AW & imm16       { doTEST(AW,imm16); }
+
+# ==========================================================================
+#  Immediate group 0x80-0x83  (reg_opcode selects the operation)
+#    0x80: rm8,imm8   0x81: rm16,imm16   0x82: rm8,imm8 (alias)   0x83: rm16,simm8
+# ==========================================================================
+:ADD  rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=0 ... ; imm8  { doADD(rm8,imm8); }
+:OR   rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=1 ... ; imm8  { doOR(rm8,imm8); }
+:ADDC rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=2 ... ; imm8  { doADC8(rm8,imm8); }
+:SUBC rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=3 ... ; imm8  { doSBB8(rm8,imm8); }
+:AND  rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=4 ... ; imm8  { doAND(rm8,imm8); }
+:SUB  rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=5 ... ; imm8  { doSUB(rm8,imm8); }
+:XOR  rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=6 ... ; imm8  { doXOR(rm8,imm8); }
+:CMP  rm8,imm8  is (byte=0x80 | byte=0x82); rm8  & reg_opcode=7 ... ; imm8  { doCMP(rm8,imm8); }
+
+:ADD  rm16,imm16 is byte=0x81; rm16 & reg_opcode=0 ... ; imm16 { doADD(rm16,imm16); }
+:OR   rm16,imm16 is byte=0x81; rm16 & reg_opcode=1 ... ; imm16 { doOR(rm16,imm16); }
+:ADDC rm16,imm16 is byte=0x81; rm16 & reg_opcode=2 ... ; imm16 { doADC16(rm16,imm16); }
+:SUBC rm16,imm16 is byte=0x81; rm16 & reg_opcode=3 ... ; imm16 { doSBB16(rm16,imm16); }
+:AND  rm16,imm16 is byte=0x81; rm16 & reg_opcode=4 ... ; imm16 { doAND(rm16,imm16); }
+:SUB  rm16,imm16 is byte=0x81; rm16 & reg_opcode=5 ... ; imm16 { doSUB(rm16,imm16); }
+:XOR  rm16,imm16 is byte=0x81; rm16 & reg_opcode=6 ... ; imm16 { doXOR(rm16,imm16); }
+:CMP  rm16,imm16 is byte=0x81; rm16 & reg_opcode=7 ... ; imm16 { doCMP(rm16,imm16); }
+
+:ADD  rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=0 ... ; simm8_16 { doADD(rm16,simm8_16); }
+:OR   rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=1 ... ; simm8_16 { doOR(rm16,simm8_16); }
+:ADDC rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=2 ... ; simm8_16 { doADC16(rm16,simm8_16); }
+:SUBC rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=3 ... ; simm8_16 { doSBB16(rm16,simm8_16); }
+:AND  rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=4 ... ; simm8_16 { doAND(rm16,simm8_16); }
+:SUB  rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=5 ... ; simm8_16 { doSUB(rm16,simm8_16); }
+:XOR  rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=6 ... ; simm8_16 { doXOR(rm16,simm8_16); }
+:CMP  rm16,simm8_16 is byte=0x83; rm16 & reg_opcode=7 ... ; simm8_16 { doCMP(rm16,simm8_16); }
+
+# ==========================================================================
+#  INC / DEC  (Intel: same)
+# ==========================================================================
+:INC reg16_op is hinyb=4 & page=0 & reg16_op { doINC(reg16_op); }   # 40-47
+:DEC reg16_op is hinyb=4 & page=1 & reg16_op { doDEC(reg16_op); }   # 48-4F
+:INC rm8  is byte=0xfe; rm8  & reg_opcode=0 ... { doINC(rm8); }
+:DEC rm8  is byte=0xfe; rm8  & reg_opcode=1 ... { doDEC(rm8); }
+:INC rm16 is byte=0xff; rm16 & reg_opcode=0 ... { doINC(rm16); }
+:DEC rm16 is byte=0xff; rm16 & reg_opcode=1 ... { doDEC(rm16); }
+
+# ==========================================================================
+#  Unary group 0xF6/0xF7  (TEST/NOT/NEG/MULU/MUL/DIVU/DIV)
+# ==========================================================================
+:TEST rm8,imm8   is byte=0xf6; rm8  & reg_opcode=0 ... ; imm8  { doTEST(rm8,imm8); }
+:TEST rm16,imm16 is byte=0xf7; rm16 & reg_opcode=0 ... ; imm16 { doTEST(rm16,imm16); }
+:NOT  rm8  is byte=0xf6; rm8  & reg_opcode=2 ... { rm8  = ~rm8; }
+:NOT  rm16 is byte=0xf7; rm16 & reg_opcode=2 ... { rm16 = ~rm16; }
+:NEG  rm8  is byte=0xf6; rm8  & reg_opcode=3 ... { doNEG(rm8); }
+:NEG  rm16 is byte=0xf7; rm16 & reg_opcode=3 ... { doNEG(rm16); }
+
+# MULU (unsigned MUL)
+:MULU rm8  is byte=0xf6; rm8  & reg_opcode=4 ... { AW = zext(AL) * zext(rm8); CY = AH != 0; V = CY; }
+:MULU rm16 is byte=0xf7; rm16 & reg_opcode=4 ... {
+  local res:4 = zext(AW) * zext(rm16);
+  AW = res:2;  DW = res(2);  CY = DW != 0;  V = CY;
+}
+# MUL (signed IMUL)
+:MUL rm8  is byte=0xf6; rm8  & reg_opcode=5 ... { AW = sext(AL) * sext(rm8);  CY = sext(AW:1) != AW; V = CY; }
+:MUL rm16 is byte=0xf7; rm16 & reg_opcode=5 ... {
+  local res:4 = sext(AW) * sext(rm16);
+  AW = res:2;  DW = res(2);  CY = sext(AW) != res;  V = CY;
+}
+# DIVU (unsigned DIV)
+:DIVU rm8  is byte=0xf6; rm8  & reg_opcode=6 ... { local d:2 = zext(rm8);  local q:2 = AW / d;  local r:2 = AW % d;  AL = q:1;  AH = r:1; }
+:DIVU rm16 is byte=0xf7; rm16 & reg_opcode=6 ... {
+  local num:4 = (zext(DW) << 16) | zext(AW);  local d:4 = zext(rm16);
+  local q:4 = num / d;  local r:4 = num % d;  AW = q:2;  DW = r:2;
+}
+# DIV (signed IDIV)
+:DIV rm8  is byte=0xf6; rm8  & reg_opcode=7 ... { local d:2 = sext(rm8);  local q:2 = AW s/ d;  local r:2 = AW s% d;  AL = q:1;  AH = r:1; }
+:DIV rm16 is byte=0xf7; rm16 & reg_opcode=7 ... {
+  local num:4 = (zext(DW) << 16) | zext(AW);  local d:4 = sext(rm16);
+  local q:4 = num s/ d;  local r:4 = num s% d;  AW = q:2;  DW = r:2;
+}
+
+# ==========================================================================
+#  Shift / rotate  (Intel: ROL/ROR/RCL/RCR/SHL/SHR/-/SAR)
+#    reg_opcode: 0 ROL  1 ROR  2 ROLC(RCL)  3 RORC(RCR)  4 SHL  5 SHR  7 SHRA(SAR)
+#    D0/D1 = by 1,  D2/D3 = by CL,  C0/C1 = by imm8 (80186)
+# ==========================================================================
+# --- rotates by 1 ---
+:ROL rm8,"1"  is byte=0xd0; rm8 & reg_opcode=0 ... { CY = rm8 s< 0; rm8 = (rm8 << 1) | CY; V = CY ^ (rm8 s< 0); }
+:ROL rm16,"1" is byte=0xd1; rm16 & reg_opcode=0 ... { CY = rm16 s< 0; rm16 = (rm16 << 1) | zext(CY); V = CY ^ (rm16 s< 0); }
+:ROR rm8,"1"  is byte=0xd0; rm8 & reg_opcode=1 ... { CY = (rm8 & 1) != 0; rm8 = (rm8 >> 1) | (CY << 7); V = ((rm8 & 0x40)!=0) ^ (rm8 s< 0); }
+:ROR rm16,"1" is byte=0xd1; rm16 & reg_opcode=1 ... { CY = (rm16 & 1) != 0; rm16 = (rm16 >> 1) | (zext(CY) << 15); V = ((rm16 & 0x4000)!=0) ^ (rm16 s< 0); }
+:ROLC rm8,"1"  is byte=0xd0; rm8 & reg_opcode=2 ... { local ci = CY; CY = rm8 s< 0; rm8 = (rm8 << 1) | ci; V = CY ^ (rm8 s< 0); }
+:ROLC rm16,"1" is byte=0xd1; rm16 & reg_opcode=2 ... { local ci = CY; CY = rm16 s< 0; rm16 = (rm16 << 1) | zext(ci); V = CY ^ (rm16 s< 0); }
+:RORC rm8,"1"  is byte=0xd0; rm8 & reg_opcode=3 ... { local ci = CY; V = (rm8 s< 0) ^ ci; CY = (rm8 & 1)!=0; rm8 = (rm8 >> 1) | (ci << 7); }
+:RORC rm16,"1" is byte=0xd1; rm16 & reg_opcode=3 ... { local ci = CY; V = (rm16 s< 0) ^ ci; CY = (rm16 & 1)!=0; rm16 = (rm16 >> 1) | (zext(ci) << 15); }
+:SHL rm8,"1"  is byte=0xd0; rm8 & (reg_opcode=4 | reg_opcode=6) ... { CY = rm8 s< 0; rm8 = rm8 << 1; V = CY ^ (rm8 s< 0); setResultFlags(rm8); }
+:SHL rm16,"1" is byte=0xd1; rm16 & (reg_opcode=4 | reg_opcode=6) ... { CY = rm16 s< 0; rm16 = rm16 << 1; V = CY ^ (rm16 s< 0); setResultFlags(rm16); }
+:SHR rm8,"1"  is byte=0xd0; rm8 & reg_opcode=5 ... { V = rm8 s< 0; CY = (rm8 & 1)!=0; rm8 = rm8 >> 1; setResultFlags(rm8); }
+:SHR rm16,"1" is byte=0xd1; rm16 & reg_opcode=5 ... { V = rm16 s< 0; CY = (rm16 & 1)!=0; rm16 = rm16 >> 1; setResultFlags(rm16); }
+:SHRA rm8,"1"  is byte=0xd0; rm8 & reg_opcode=7 ... { CY = (rm8 & 1)!=0; V = 0; rm8 = rm8 s>> 1; setResultFlags(rm8); }
+:SHRA rm16,"1" is byte=0xd1; rm16 & reg_opcode=7 ... { CY = (rm16 & 1)!=0; V = 0; rm16 = rm16 s>> 1; setResultFlags(rm16); }
+
+# --- shifts/rotates by CL ---
+:ROL rm8,CL  is byte=0xd2; CL & rm8 & reg_opcode=0 ... { local n = CL & 0x7; rm8 = (rm8 << n) | (rm8 >> (8 - n)); CY = (rm8 & 1)!=0; }
+:ROL rm16,CL is byte=0xd3; CL & rm16 & reg_opcode=0 ... { local n = zext(CL) & 0xf; rm16 = (rm16 << n) | (rm16 >> (16 - n)); CY = (rm16 & 1)!=0; }
+:ROR rm8,CL  is byte=0xd2; CL & rm8 & reg_opcode=1 ... { local n = CL & 0x7; rm8 = (rm8 >> n) | (rm8 << (8 - n)); CY = (rm8 s< 0); }
+:ROR rm16,CL is byte=0xd3; CL & rm16 & reg_opcode=1 ... { local n = zext(CL) & 0xf; rm16 = (rm16 >> n) | (rm16 << (16 - n)); CY = (rm16 s< 0); }
+:ROLC rm8,CL  is byte=0xd2; CL & rm8 & reg_opcode=2 ... { local n = (CL & 0x1f) % 9; local t:2 = (zext(CY) << 8) | zext(rm8); t = (t << n) | (t >> (9 - n)); rm8 = t:1; CY = (t & 0x100)!=0; }
+:ROLC rm16,CL is byte=0xd3; CL & rm16 & reg_opcode=2 ... { local n = (zext(CL) & 0x1f) % 17; local t:4 = (zext(CY) << 16) | zext(rm16); t = (t << n) | (t >> (17 - n)); rm16 = t:2; CY = (t & 0x10000)!=0; }
+:RORC rm8,CL  is byte=0xd2; CL & rm8 & reg_opcode=3 ... { local n = (CL & 0x1f) % 9; local t:2 = (zext(CY) << 8) | zext(rm8); t = (t >> n) | (t << (9 - n)); rm8 = t:1; CY = (t & 0x100)!=0; }
+:RORC rm16,CL is byte=0xd3; CL & rm16 & reg_opcode=3 ... { local n = (zext(CL) & 0x1f) % 17; local t:4 = (zext(CY) << 16) | zext(rm16); t = (t >> n) | (t << (17 - n)); rm16 = t:2; CY = (t & 0x10000)!=0; }
+:SHL rm8,CL  is byte=0xd2; CL & rm8 & (reg_opcode=4 | reg_opcode=6) ... { local n = CL & 0x1f; local t:1 = rm8; rm8 = rm8 << n; CY = (n!=0) && (((t >> (8-n)) & 1)!=0); setResultFlags(rm8); }
+:SHL rm16,CL is byte=0xd3; CL & rm16 & (reg_opcode=4 | reg_opcode=6) ... { local n = zext(CL) & 0x1f; local t:2 = rm16; rm16 = rm16 << n; CY = (n!=0) && (((t >> (16-n)) & 1)!=0); setResultFlags(rm16); }
+:SHR rm8,CL  is byte=0xd2; CL & rm8 & reg_opcode=5 ... { local n = CL & 0x1f; local t:1 = rm8; rm8 = rm8 >> n; CY = (n!=0) && (((t >> (n-1)) & 1)!=0); setResultFlags(rm8); }
+:SHR rm16,CL is byte=0xd3; CL & rm16 & reg_opcode=5 ... { local n = zext(CL) & 0x1f; local t:2 = rm16; rm16 = rm16 >> n; CY = (n!=0) && (((t >> (n-1)) & 1)!=0); setResultFlags(rm16); }
+:SHRA rm8,CL  is byte=0xd2; CL & rm8 & reg_opcode=7 ... { local n = CL & 0x1f; local t:1 = rm8; rm8 = rm8 s>> n; CY = (n!=0) && (((t s>> (n-1)) & 1)!=0); setResultFlags(rm8); }
+:SHRA rm16,CL is byte=0xd3; CL & rm16 & reg_opcode=7 ... { local n = zext(CL) & 0x1f; local t:2 = rm16; rm16 = rm16 s>> n; CY = (n!=0) && (((t s>> (n-1)) & 1)!=0); setResultFlags(rm16); }
+
+# ==========================================================================
+#  Type conversion  (Intel: CBW/CWD/AAM/AAD)
+# ==========================================================================
+:CVTBW is byte=0x98 { AW = sext(AL); }                                 # CBW
+:CVTWL is byte=0x99 { local t:4 = sext(AW); DW = t(2); }               # CWD
+:CVTBD imm8 is byte=0xd4; imm8 { local b:1 = imm8; AH = AL / b; AL = AL % b; setResultFlags(AL); }  # AAM
+:CVTDB imm8 is byte=0xd5; imm8 { local b:1 = imm8; AL = AH * b + AL; AH = 0; setResultFlags(AL); }  # AAD
+
+# ==========================================================================
+#  BCD adjust  (Intel: DAA/DAS/AAA/AAS) - modeled as black-box p-code ops
+# ==========================================================================
+:ADJ4A is byte=0x27 { adjustBCDAddition(); }       # DAA  TODO: full semantics
+:ADJ4S is byte=0x2f { adjustBCDSubtraction(); }    # DAS  TODO: full semantics
+:ADJBA is byte=0x37 { adjustASCIIAddition(); }     # AAA  TODO: full semantics
+:ADJBS is byte=0x3f { adjustASCIISubtraction(); }  # AAS  TODO: full semantics
+
+# ==========================================================================
+#  I/O  (Intel: IN/OUT)
+# ==========================================================================
+# Fixed 8-bit port number, exported as a 2-byte constant io address so a
+# <default_symbols> name at io:00xx (if any) resolves on the operand.
+ioP8: imm8 is imm8 { export *[const]:2 imm8; }
+
+:IN "AL",ioP8 is byte=0xe4; ioP8 { AL = *[io]:1 ioP8; }
+:IN "AW",ioP8 is byte=0xe5; ioP8 { AW = *[io]:2 ioP8; }
+:IN "AL",DW   is byte=0xec & DW   { AL = *[io]:1 DW; }
+:IN "AW",DW   is byte=0xed & DW   { AW = *[io]:2 DW; }
+:OUT ioP8,"AL" is byte=0xe6; ioP8 { *[io]:1 ioP8 = AL; }
+:OUT ioP8,"AW" is byte=0xe7; ioP8 { *[io]:2 ioP8 = AW; }
+:OUT DW,"AL"   is byte=0xee & DW   { *[io]:1 DW = AL; }
+:OUT DW,"AW"   is byte=0xef & DW   { *[io]:2 DW = AW; }
+
+# ==========================================================================
+#  Block transfer (string) - MOVBK/CMPBK/CMPM/LDM/STM
+# ==========================================================================
+:MOVBK^repPfx^repEnd eseDI1,dseSI1 is repPfx & repEnd & byte=0xa4 & eseDI1 & dseSI1 { build repPfx; build eseDI1; build dseSI1; eseDI1 = dseSI1; build repEnd; }
+:MOVBK^repPfx^repEnd eseDI2,dseSI2 is repPfx & repEnd & byte=0xa5 & eseDI2 & dseSI2 { build repPfx; build eseDI2; build dseSI2; eseDI2 = dseSI2; build repEnd; }
+:STM^repPfx^repEnd eseDI1 is repPfx & repEnd & byte=0xaa & eseDI1 { build repPfx; build eseDI1; eseDI1 = AL; build repEnd; }
+:STM^repPfx^repEnd eseDI2 is repPfx & repEnd & byte=0xab & eseDI2 { build repPfx; build eseDI2; eseDI2 = AW; build repEnd; }
+:LDM^repPfx^repEnd dseSI1 is repPfx & repEnd & byte=0xac & dseSI1 { build repPfx; build dseSI1; AL = dseSI1; build repEnd; }
+:LDM^repPfx^repEnd dseSI2 is repPfx & repEnd & byte=0xad & dseSI2 { build repPfx; build dseSI2; AW = dseSI2; build repEnd; }
+:CMPBK^repePfx^repeEnd dseSI1,eseDI1 is repePfx & repeEnd & byte=0xa6 & dseSI1 & eseDI1 { build repePfx; build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); build repeEnd; }
+:CMPBK^repePfx^repeEnd dseSI2,eseDI2 is repePfx & repeEnd & byte=0xa7 & dseSI2 & eseDI2 { build repePfx; build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); build repeEnd; }
+:CMPM^repePfx^repeEnd eseDI1 is repePfx & repeEnd & byte=0xae & eseDI1 { build repePfx; build eseDI1; local d:1 = eseDI1; doCMP(AL,d); build repeEnd; }
+:CMPM^repePfx^repeEnd eseDI2 is repePfx & repeEnd & byte=0xaf & eseDI2 { build repePfx; build eseDI2; local d:2 = eseDI2; doCMP(AW,d); build repeEnd; }
+
+# ==========================================================================
+#  Control transfer - BR (JMP) / CALL / RET
+# ==========================================================================
+:BR rel8   is byte=0xeb; rel8  { goto rel8; }
+:BR rel16  is byte=0xe9; rel16 { goto rel16; }
+:BR farptr is byte=0xea; farptr { goto farptr; }                    # JMP FAR seg:off
+:BR rm16   is byte=0xff; rm16 & reg_opcode=4 ... { goto [rm16]; }   # JMP near indirect
+:BR addr16 is byte=0xff; addr16 & reg_opcode=5 ... {                # JMP far indirect
+  local base:4 = segment(DS0, addr16);
+  local off:2 = *:2 base;  local seg:2 = *:2 (base + 2);
+  PS = seg;  local tgt:4 = segment(seg, off);  goto [tgt];
+}
+
+:CALL rel16  is byte=0xe8; rel16 { push16(&:2 inst_next); call rel16; }
+:CALL rm16   is byte=0xff; rm16 & reg_opcode=2 ... { push16(&:2 inst_next); call [rm16]; }  # near indirect
+:CALL farptr is byte=0x9a; farptr { push16(PS); push16(&:2 inst_next); call farptr; }       # CALL FAR seg:off
+:CALL addr16 is byte=0xff; addr16 & reg_opcode=3 ... {                                       # far indirect
+  local base:4 = segment(DS0, addr16);
+  local off:2 = *:2 base;  local seg:2 = *:2 (base + 2);
+  push16(PS); push16(&:2 inst_next);
+  PS = seg;  local tgt:4 = segment(seg, off);  call [tgt];
+}
+
+:RET       is byte=0xc3       { local off:2; pop16(off); local t:4 = segment(PS,off); return [t]; }
+:RET imm16 is byte=0xc2; imm16 { local off:2; pop16(off); SP = SP + imm16; local t:4 = segment(PS,off); return [t]; }
+:RET       is byte=0xcb       { local off:2; pop16(off); pop16(PS); local t:4 = segment(PS,off); return [t]; }          # RETF
+:RET imm16 is byte=0xca; imm16 { local off:2; pop16(off); pop16(PS); SP = SP + imm16; local t:4 = segment(PS,off); return [t]; } # RETF imm16
+
+# ==========================================================================
+#  Conditional branches  (NEC Bcc, Intel Jcc)
+# ==========================================================================
+:BV   rel8 is byte=0x70; rel8 { if (V!=0) goto rel8; }                        # JO
+:BNV  rel8 is byte=0x71; rel8 { if (V==0) goto rel8; }                        # JNO
+:BC   rel8 is byte=0x72; rel8 { if (CY!=0) goto rel8; }                        # JC/JB
+:BNC  rel8 is byte=0x73; rel8 { if (CY==0) goto rel8; }                        # JNC/JAE
+:BE   rel8 is byte=0x74; rel8 { if (Z!=0) goto rel8; }                        # JE/JZ
+:BNE  rel8 is byte=0x75; rel8 { if (Z==0) goto rel8; }                        # JNE/JNZ
+:BNH  rel8 is byte=0x76; rel8 { if ((CY||Z)!=0) goto rel8; }                  # JBE/JNA
+:BH   rel8 is byte=0x77; rel8 { if ((CY||Z)==0) goto rel8; }                  # JA/JNBE
+:BN   rel8 is byte=0x78; rel8 { if (S!=0) goto rel8; }                        # JS
+:BP   rel8 is byte=0x79; rel8 { if (S==0) goto rel8; }                        # JNS
+:BPE  rel8 is byte=0x7a; rel8 { if (P!=0) goto rel8; }                        # JP/JPE
+:BPO  rel8 is byte=0x7b; rel8 { if (P==0) goto rel8; }                        # JNP/JPO
+:BLT  rel8 is byte=0x7c; rel8 { if ((S^^V)!=0) goto rel8; }                  # JL/JNGE
+:BGE  rel8 is byte=0x7d; rel8 { if ((S^^V)==0) goto rel8; }                  # JGE/JNL
+:BLE  rel8 is byte=0x7e; rel8 { if (((S^^V)||Z)!=0) goto rel8; }            # JLE/JNG
+:BGT  rel8 is byte=0x7f; rel8 { if (((S^^V)||Z)==0) goto rel8; }            # JG/JNLE
+
+# ==========================================================================
+#  Loop / CW branches  (NEC DBNZ*, BCWZ ; Intel LOOP*/JCXZ)
+# ==========================================================================
+:DBNZNE rel8 is byte=0xe0; rel8 { CW = CW - 1; if ((CW!=0) && (Z==0)) goto rel8; }  # LOOPNE
+:DBNZE  rel8 is byte=0xe1; rel8 { CW = CW - 1; if ((CW!=0) && (Z!=0)) goto rel8; }  # LOOPE
+:DBNZ   rel8 is byte=0xe2; rel8 { CW = CW - 1; if (CW!=0) goto rel8; }               # LOOP
+:BCWZ   rel8 is byte=0xe3; rel8 { if (CW==0) goto rel8; }                            # JCXZ
+
+# ==========================================================================
+#  Interrupts  (NEC BRK/BRKV/RETI, Intel INT/INTO/IRET)
+# ==========================================================================
+macro doINT(vector) {
+  local f:2;  packFlags(f);  push16(f);
+  IE = 0;  BRK = 0;
+  push16(PS);  push16(&:2 inst_next);
+  local voff:4 = zext(vector) * 4;
+  local newoff:2 = *[ram]:2 voff;
+  local newseg:2 = *[ram]:2 (voff + 2);
+  PS = newseg;
+  local tgt:4 = segment(newseg, newoff);
+  call [tgt];
+}
+:BRK "3"    is byte=0xcc       { doINT(3:1); }
+:BRK imm8   is byte=0xcd; imm8 { local v:1 = imm8; doINT(v); }
+:BRKV       is byte=0xce       { if (V==0) goto inst_next; doINT(4:1); }
+:RETI       is byte=0xcf       { local off:2; pop16(off); pop16(PS); local f:2; pop16(f); unpackFlags(f); local t:4 = segment(PS,off); return [t]; }
+
+# ==========================================================================
+#  Flag operations  (NEC SET1/CLR1/NOT1 CY/DIR, Intel STC/CLC/CMC/STD/CLD)
+# ==========================================================================
+:SET1 "CY"  is byte=0xf9 { CY = 1; }   # STC
+:CLR1 "CY"  is byte=0xf8 { CY = 0; }   # CLC
+:NOT1 "CY"  is byte=0xf5 { CY = CY == 0; }   # CMC
+:SET1 "DIR" is byte=0xfd { DIR = 1; }   # STD
+:CLR1 "DIR" is byte=0xfc { DIR = 0; }   # CLD
+:EI       is byte=0xfb { IE = 1; }   # STI
+:DI       is byte=0xfa { IE = 0; }   # CLI (NEC mnemonic DI = disable interrupt)
+
+# ==========================================================================
+#  Processor control
+# ==========================================================================
+:NOP     is byte=0x90 { }                           # NOP (XCH AW,AW); more specific than XCH so wins for 0x90
+:HALT    is byte=0xf4 { halt(); }                   # HLT
+:POLL    is byte=0x9b { poll(); }                   # WAIT/FWAIT
+:FPO2 rm8 is byte=0xd8; rm8 ... { fpu_op(); }       # coprocessor escape (no FPU modeled)
+:FPO2 rm8 is byte=0xd9; rm8 ... { fpu_op(); }
+:FPO2 rm8 is byte=0xda; rm8 ... { fpu_op(); }
+:FPO2 rm8 is byte=0xdb; rm8 ... { fpu_op(); }
+:FPO2 rm8 is byte=0xdc; rm8 ... { fpu_op(); }
+:FPO2 rm8 is byte=0xdd; rm8 ... { fpu_op(); }
+:FPO2 rm8 is byte=0xde; rm8 ... { fpu_op(); }
+:FPO2 rm8 is byte=0xdf; rm8 ... { fpu_op(); }

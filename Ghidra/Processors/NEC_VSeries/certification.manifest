@@ -1,0 +1,16 @@
+##VERSION: 2.0
+Module.manifest||GHIDRA||||END|
+README.md||GHIDRA||||END|
+data/languages/V-Series.cspec||GHIDRA||||END|
+data/languages/V-Series.ldefs||GHIDRA||||END|
+data/languages/V20.pspec||GHIDRA||||END|
+data/languages/V30.pspec||GHIDRA||||END|
+data/languages/V40.pspec||GHIDRA||||END|
+data/languages/V50.pspec||GHIDRA||||END|
+data/languages/vseries.slaspec||GHIDRA||||END|
+data/languages/vseries_registers.sinc||GHIDRA||||END|
+data/languages/vseries_tokens.sinc||GHIDRA||||END|
+data/languages/vseries_8086.sinc||GHIDRA||||END|
+data/languages/vseries_80186.sinc||GHIDRA||||END|
+data/languages/vseries_nec.sinc||GHIDRA||||END|
+data/manuals/V-Series.idx||GHIDRA||||END|

@@ -1,0 +1,271 @@
+# ==========================================================================
+#  NEC V-Series - exclusive instructions
+# --------------------------------------------------------------------------
+#  The NEC-only instructions with no mainstream x86 equivalent.  "Exclusive"
+#  here means exclusive to the NEC V-Series relative to the Intel 8086/80186 -
+#  NOT specific to the V50.  This exact set is common to ALL of V20/V30/V40/V50
+#  (they share one instruction set; the parts differ only in bus width and, for
+#  V40/V50, on-chip peripheral SFRs handled in the per-variant .pspec).  That is
+#  why this file is compiled into the single shared vseries.sla.
+#
+#  Most are reached through the V-Series '0F' instruction prefix (in the
+#  V-Series the 0F byte is a dedicated prefix, not the x86 two-byte-opcode
+#  escape), except REPC/REPNC (0x65/0x64) which are handled as prefixes in
+#  vseries_8086.sinc.
+#
+#  Adapted from necv50_extra.sinc: the @ifdef NEC_V50 guards and the x86
+#  'vexMode=0' conditions have been removed (this is a standalone module, so
+#  there are no conflicts), and the operand sub-tables (rm8/rm16/Reg8/Rmr8)
+#  are the ones defined in vseries_tokens.sinc.
+#
+#  Opcode summary (W = low opcode bit; bit position from CL or imm8):
+#    Bit ops (reg field = 000): TEST1 0F10/11, CLR1 0F12/13, SET1 0F14/15,
+#      NOT1 0F16/17 (bit from CL); 0F18..1F (bit from imm8).
+#    BCD strings (DS0:IX, DS1:IY, count CL): ADD4S 0F20, SUB4S 0F22, CMP4S 0F26.
+#    Nibble rotate through AL: ROL4 0F28, ROR4 0F2A (r/m8).
+#    Bit field: INS 0F31 (reg,reg) / 0F39 (reg,imm8), EXT 0F33 / 0F3B.
+#    8080 mode: BRKEM 0FFF imm8, RETEM 0FFD, CALLN 0FED imm8.
+#
+#  Depends on vseries_registers.sinc / vseries_tokens.sinc (@included first).
+# ==========================================================================
+
+# --- 8080 emulation-mode switches are decode-only (full 8080 decode out of scope)
+define pcodeop enter8080Mode;     # BRKEM : switch to 8080 emulation mode
+define pcodeop leave8080Mode;     # RETEM
+define pcodeop call8080;          # CALLN
+
+# ==========================================================================
+#  Bit manipulation, bit position from CL   (0F 10..17), reg field = 000.
+#  rm8/rm16 covers both the register (mod=3) and memory forms.
+# ==========================================================================
+:TEST1 rm8,CL  is byte=0x0f; byte=0x10; CL & rm8 & reg_opcode=0 ... {
+    Z = ((rm8 >> (CL & 0x7)) & 1:1) == 0:1;
+}
+:TEST1 rm16,CL is byte=0x0f; byte=0x11; CL & rm16 & reg_opcode=0 ... {
+    Z = ((rm16 >> (CL & 0xf)) & 1:2) == 0:2;
+}
+:CLR1 rm8,CL   is byte=0x0f; byte=0x12; CL & rm8 & reg_opcode=0 ... {
+    rm8 = rm8 & ~(1:1 << (CL & 0x7));
+}
+:CLR1 rm16,CL  is byte=0x0f; byte=0x13; CL & rm16 & reg_opcode=0 ... {
+    rm16 = rm16 & ~(1:2 << (CL & 0xf));
+}
+:SET1 rm8,CL   is byte=0x0f; byte=0x14; CL & rm8 & reg_opcode=0 ... {
+    rm8 = rm8 | (1:1 << (CL & 0x7));
+}
+:SET1 rm16,CL  is byte=0x0f; byte=0x15; CL & rm16 & reg_opcode=0 ... {
+    rm16 = rm16 | (1:2 << (CL & 0xf));
+}
+:NOT1 rm8,CL   is byte=0x0f; byte=0x16; CL & rm8 & reg_opcode=0 ... {
+    rm8 = rm8 ^ (1:1 << (CL & 0x7));
+}
+:NOT1 rm16,CL  is byte=0x0f; byte=0x17; CL & rm16 & reg_opcode=0 ... {
+    rm16 = rm16 ^ (1:2 << (CL & 0xf));
+}
+
+# ==========================================================================
+#  Bit manipulation, bit position from imm8   (0F 18..1F)
+# ==========================================================================
+:TEST1 rm8,imm8  is byte=0x0f; byte=0x18; rm8 & reg_opcode=0 ... ; imm8 {
+    Z = ((rm8 >> (imm8 & 0x7)) & 1:1) == 0:1;
+}
+:TEST1 rm16,imm8 is byte=0x0f; byte=0x19; rm16 & reg_opcode=0 ... ; imm8 {
+    Z = ((rm16 >> (imm8 & 0xf)) & 1:2) == 0:2;
+}
+:CLR1 rm8,imm8   is byte=0x0f; byte=0x1a; rm8 & reg_opcode=0 ... ; imm8 {
+    rm8 = rm8 & ~(1:1 << (imm8 & 0x7));
+}
+:CLR1 rm16,imm8  is byte=0x0f; byte=0x1b; rm16 & reg_opcode=0 ... ; imm8 {
+    rm16 = rm16 & ~(1:2 << (imm8 & 0xf));
+}
+:SET1 rm8,imm8   is byte=0x0f; byte=0x1c; rm8 & reg_opcode=0 ... ; imm8 {
+    rm8 = rm8 | (1:1 << (imm8 & 0x7));
+}
+:SET1 rm16,imm8  is byte=0x0f; byte=0x1d; rm16 & reg_opcode=0 ... ; imm8 {
+    rm16 = rm16 | (1:2 << (imm8 & 0xf));
+}
+:NOT1 rm8,imm8   is byte=0x0f; byte=0x1e; rm8 & reg_opcode=0 ... ; imm8 {
+    rm8 = rm8 ^ (1:1 << (imm8 & 0x7));
+}
+:NOT1 rm16,imm8  is byte=0x0f; byte=0x1f; rm16 & reg_opcode=0 ... ; imm8 {
+    rm16 = rm16 ^ (1:2 << (imm8 & 0xf));
+}
+
+# ==========================================================================
+#  Packed-BCD string arithmetic  0F 20/22/26
+# --------------------------------------------------------------------------
+#  Source string DS0:IX (Intel DS:SI), destination string DS1:IY (Intel ES:DI), digit
+#  count in CL (1..254 digits => ceil(CL/2) bytes, two BCD digits per byte).
+#    ADD4S: dst := dst + src        SUB4S: dst := dst - src
+#    CMP4S: dst - src (flags only, result not stored)
+#  IX/IY/CL are NOT modified.  Flags: CY = carry/borrow out of the top digit,
+#  Z = result all zero, V modeled as the final carry/borrow (data-book: V/CY/Z
+#  affected).  For an odd digit count the upper nibble of the top byte is
+#  hardware-undefined; this loop computes it, matching the even-count case.
+# ==========================================================================
+:ADD4S is byte=0x0f; byte=0x20 {
+    local sbase:4 = segment(DS0, IX);
+    local dbase:4 = segment(DS1, IY);
+    local n:2 = (zext(CL) + 1) >> 1;
+    local i:2 = 0;
+    local carry:1 = 0;
+    local nz:1 = 0;
+  <loop>
+    if (i >= n) goto <done>;
+    local a:1 = *[ram]:1 (dbase + zext(i));
+    local b:1 = *[ram]:1 (sbase + zext(i));
+    local lo:2 = zext(a & 0x0f) + zext(b & 0x0f) + zext(carry);
+    local lc:1 = lo >= 10;
+    lo = lo - zext(lc) * 10;
+    local hi:2 = zext(a >> 4) + zext(b >> 4) + zext(lc);
+    carry = hi >= 10;
+    hi = hi - zext(carry) * 10;
+    local r:1 = (hi:1 << 4) | lo:1;
+    *[ram]:1 (dbase + zext(i)) = r;
+    nz = nz | (r != 0);
+    i = i + 1;
+    goto <loop>;
+  <done>
+    CY = carry; Z = nz == 0; V = carry;
+}
+
+:SUB4S is byte=0x0f; byte=0x22 {
+    local sbase:4 = segment(DS0, IX);
+    local dbase:4 = segment(DS1, IY);
+    local n:2 = (zext(CL) + 1) >> 1;
+    local i:2 = 0;
+    local borrow:1 = 0;
+    local nz:1 = 0;
+  <loop>
+    if (i >= n) goto <done>;
+    local a:1 = *[ram]:1 (dbase + zext(i));
+    local b:1 = *[ram]:1 (sbase + zext(i));
+    local lo:2 = zext(a & 0x0f) - zext(b & 0x0f) - zext(borrow);
+    local lc:1 = lo s< 0;
+    lo = lo + zext(lc) * 10;
+    local hi:2 = zext(a >> 4) - zext(b >> 4) - zext(lc);
+    borrow = hi s< 0;
+    hi = hi + zext(borrow) * 10;
+    local r:1 = (hi:1 << 4) | lo:1;
+    *[ram]:1 (dbase + zext(i)) = r;
+    nz = nz | (r != 0);
+    i = i + 1;
+    goto <loop>;
+  <done>
+    CY = borrow; Z = nz == 0; V = borrow;
+}
+
+:CMP4S is byte=0x0f; byte=0x26 {
+    local sbase:4 = segment(DS0, IX);
+    local dbase:4 = segment(DS1, IY);
+    local n:2 = (zext(CL) + 1) >> 1;
+    local i:2 = 0;
+    local borrow:1 = 0;
+    local nz:1 = 0;
+  <loop>
+    if (i >= n) goto <done>;
+    local a:1 = *[ram]:1 (dbase + zext(i));
+    local b:1 = *[ram]:1 (sbase + zext(i));
+    local lo:2 = zext(a & 0x0f) - zext(b & 0x0f) - zext(borrow);
+    local lc:1 = lo s< 0;
+    lo = lo + zext(lc) * 10;
+    local hi:2 = zext(a >> 4) - zext(b >> 4) - zext(lc);
+    borrow = hi s< 0;
+    hi = hi + zext(borrow) * 10;
+    local r:1 = (hi:1 << 4) | lo:1;
+    nz = nz | (r != 0);           # result not stored
+    i = i + 1;
+    goto <loop>;
+  <done>
+    CY = borrow; Z = nz == 0; V = borrow;
+}
+
+# ==========================================================================
+#  Nibble rotate through AL   (0F 28 ROL4 / 0F 2A ROR4), r/m8, reg field = 000
+#    ROL4: {AL[3:0], op[7:4], op[3:0]} rotated one nibble left
+#    ROR4: the same, one nibble right
+# ==========================================================================
+:ROL4 rm8 is byte=0x0f; byte=0x28; rm8 & reg_opcode=0 ... {
+    local t:1 = rm8;
+    rm8 = (t << 4) | (AL & 0x0f);
+    AL  = (AL & 0xf0) | (t >> 4);
+}
+:ROR4 rm8 is byte=0x0f; byte=0x2a; rm8 & reg_opcode=0 ... {
+    local t:1 = rm8;
+    rm8 = (t >> 4) | ((AL & 0x0f) << 4);
+    AL  = (AL & 0xf0) | (t & 0x0f);
+}
+
+# ==========================================================================
+#  Bit-field insert / extract    0F 31/33 (reg,reg)  0F 39/3B (reg,imm4)
+# --------------------------------------------------------------------------
+#  First operand  = bit-offset register (low 4 bits, 0..15).
+#  Second operand = bit length (register or imm4, low 4 bits: 0->1 bit .. 15->16).
+#  EXT: AW := field extracted from DS0:IX (Intel DS:SI), right-justified/zero-filled.
+#  INS: field at DS1:IY (Intel ES:DI) := low bits of AW.
+#  A field is up to 16 bits at a 0..15 bit offset, so it spans at most 4 bytes.
+#  After the transfer the byte pointer (IX/IY) and the low 4 bits of the offset
+#  register advance by 'length' bits to the next field.  (The byte-vs-word
+#  granularity of that advance is not fully specified in the data book; the
+#  absolute bit position start+length is preserved either way, so successive
+#  fields extract/insert identically.)
+# ==========================================================================
+macro extField(base, off, len, out) {
+    local data:4 = *[ram]:4 base;
+    local mask:4 = (1:4 << len) - 1;
+    local field:4 = (data >> off) & mask;
+    out = field;
+}
+macro insField(base, off, len, val) {
+    local data:4 = *[ram]:4 base;
+    local fmask:4 = (1:4 << len) - 1;
+    local pmask:4 = fmask << off;
+    local ins:4 = (val & fmask) << off;
+    data = (data & ~pmask) | ins;
+    *[ram]:4 base = data;
+}
+
+:EXT Reg8,Rmr8 is byte=0x0f; byte=0x33; mod=3 & Reg8 & Rmr8 {
+    local ov:1 = Reg8 & 0x0f;  local off:4 = zext(ov);
+    local lv:1 = Rmr8 & 0x0f;  local len:4 = zext(lv) + 1;
+    local base:4 = segment(DS0, IX);
+    local res:4;  extField(base, off, len, res);  AW = res:2;
+    local total:4 = off + len;
+    local adv:4 = total >> 3;   IX = IX + adv:2;
+    local no:4 = total & 0x7;   Reg8 = (Reg8 & 0xf0) | no:1;
+}
+:INS Reg8,Rmr8 is byte=0x0f; byte=0x31; mod=3 & Reg8 & Rmr8 {
+    local ov:1 = Reg8 & 0x0f;  local off:4 = zext(ov);
+    local lv:1 = Rmr8 & 0x0f;  local len:4 = zext(lv) + 1;
+    local base:4 = segment(DS1, IY);
+    local val:4 = zext(AW);  insField(base, off, len, val);
+    local total:4 = off + len;
+    local adv:4 = total >> 3;   IY = IY + adv:2;
+    local no:4 = total & 0x7;   Reg8 = (Reg8 & 0xf0) | no:1;
+}
+:EXT Rmr8,imm8 is byte=0x0f; byte=0x3b; mod=3 & reg_opcode=0 & Rmr8; imm8 {
+    local ov:1 = Rmr8 & 0x0f;  local off:4 = zext(ov);
+    local lv:1 = imm8 & 0x0f;  local len:4 = zext(lv) + 1;
+    local base:4 = segment(DS0, IX);
+    local res:4;  extField(base, off, len, res);  AW = res:2;
+    local total:4 = off + len;
+    local adv:4 = total >> 3;   IX = IX + adv:2;
+    local no:4 = total & 0x7;   Rmr8 = (Rmr8 & 0xf0) | no:1;
+}
+:INS Rmr8,imm8 is byte=0x0f; byte=0x39; mod=3 & reg_opcode=0 & Rmr8; imm8 {
+    local ov:1 = Rmr8 & 0x0f;  local off:4 = zext(ov);
+    local lv:1 = imm8 & 0x0f;  local len:4 = zext(lv) + 1;
+    local base:4 = segment(DS1, IY);
+    local val:4 = zext(AW);  insField(base, off, len, val);
+    local total:4 = off + len;
+    local adv:4 = total >> 3;   IY = IY + adv:2;
+    local no:4 = total & 0x7;   Rmr8 = (Rmr8 & 0xf0) | no:1;
+}
+
+# ==========================================================================
+#  8080 emulation mode entry/exit  (decode only; full 8080 decode is out of
+#  scope - see the module design notes).
+# ==========================================================================
+:BRKEM imm8 is byte=0x0f; byte=0xff; imm8 { enter8080Mode(); }
+:RETEM      is byte=0x0f; byte=0xfd       { leave8080Mode(); }
+:CALLN imm8 is byte=0x0f; byte=0xed; imm8 { call8080(); }

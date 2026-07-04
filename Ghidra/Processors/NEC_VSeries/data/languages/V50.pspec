@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- NEC V50 (uPD70216) - V30-compatible core (16-bit data bus) plus on-chip
+     peripherals, 16-bit real mode.
+     Segment/PC/context setup modeled on Ghidra's x86-16-real.pspec. -->
+<processor_spec>
+  <properties>
+    <property key="useOperandReferenceAnalyzerSwitchTables" value="true"/>
+  </properties>
+  <!-- PC (NEC program counter, Intel IP).  Declared 4 bytes wide so it can hold
+       a linear real-mode address; its low 16 bits are the architectural PC.
+       See vseries_registers.sinc for the full rationale. -->
+  <programcounter register="PC"/>
+  <segmented_address space="ram" type="real"/>
+  <segmentop space="ram" userop="segment" farpointer="yes">
+    <pcode>
+      <input name="base" size="2"/>
+      <input name="inner" size="2"/>
+      <output name="res" size="4"/>
+      <body><![CDATA[
+        res = ((zext(base) << 4) + zext(inner)) & 0xFFFFF;
+      ]]></body>
+    </pcode>
+    <constresolve>
+      <register name="DS0"/>
+    </constresolve>
+  </segmentop>
+  <context_data>
+    <tracked_set space="ram">
+      <set name="DIR" val="0"/>
+    </tracked_set>
+  </context_data>
+
+  <!-- On-chip peripheral control registers (the fixed "system I/O area",
+       I/O addresses FF00H-FFFFH; uPD70216 data sheet).  The relocatable
+       DMAU/ICU/TCU/SCU peripheral register blocks are based at the OPHA-set
+       address chosen by firmware and so are not given fixed symbols here. -->
+  <default_symbols>
+    <symbol name="TCKS"  address="io:fff0" entry="false"/>  <!-- timer clock select        -->
+    <symbol name="RFC"   address="io:fff2" entry="false"/>  <!-- refresh control            -->
+    <symbol name="WMB"   address="io:fff4" entry="false"/>  <!-- wait-state memory boundary -->
+    <symbol name="WCY1"  address="io:fff5" entry="false"/>  <!-- wait control 1             -->
+    <symbol name="WCY2"  address="io:fff6" entry="false"/>  <!-- wait control 2             -->
+    <symbol name="SULA"  address="io:fff8" entry="false"/>  <!-- SCU  low address           -->
+    <symbol name="TULA"  address="io:fff9" entry="false"/>  <!-- TCU  low address           -->
+    <symbol name="IULA"  address="io:fffa" entry="false"/>  <!-- ICU  low address           -->
+    <symbol name="DULA"  address="io:fffb" entry="false"/>  <!-- DMAU low address           -->
+    <symbol name="OPHA"  address="io:fffc" entry="false"/>  <!-- peripheral high address    -->
+    <symbol name="OPSEL" address="io:fffd" entry="false"/>  <!-- peripheral select          -->
+    <symbol name="OPCN"  address="io:fffe" entry="false"/>  <!-- peripheral connection       -->
+  </default_symbols>
+</processor_spec>

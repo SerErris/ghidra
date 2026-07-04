@@ -1,0 +1,119 @@
+# ==========================================================================
+#  NEC V-Series (V20/V30/V40/V50) - address spaces, register model, context
+# --------------------------------------------------------------------------
+#  16-bit real mode only.  Register and flag names follow the NEC data-book
+#  convention (AW/BW/IX/IY/PS/DS0/DS1/PSW, ...); the equivalent Intel 8086
+#  names are given in comments purely for cross-reference.  The V-Series
+#  "enhancements" are micro-architectural (hardware multiply/divide, faster
+#  execution) plus extra instructions plus an 8080 emulation mode - NOT new
+#  programmer-visible registers.  Do not add general-purpose or "loop counter"
+#  registers that the hardware does not have.
+#
+#  Source: 1991 NEC 16-Bit V-Series Data Book (register set, flag names).
+# ==========================================================================
+
+define endian=little;
+
+# Instructions are byte-aligned and variable length.
+define alignment=1;
+
+# --------------------------------------------------------------------------
+#  Address spaces
+# --------------------------------------------------------------------------
+#  Real-mode physical addresses are 20-bit ((segment << 4) + offset), so the
+#  default RAM space uses 4-byte addresses (as computed by the "segment" op).
+define space ram      type=ram_space      size=4  default;
+define space register type=register_space size=4;
+#  Separate 64K I/O port space (accessed by IN/OUT/INM/OUTM).  The V40/V50
+#  on-chip peripheral SFRs live here and are named via <default_symbols> in the
+#  per-variant .pspec; V20/V30 have no on-chip peripherals.
+define space io       type=ram_space      size=2;
+
+# --------------------------------------------------------------------------
+#  General-purpose registers (NEC data-book names)
+# --------------------------------------------------------------------------
+#  16-bit words AW CW DW BW SP BP IX IY; the 8-bit halves AL/AH ... BL/BH
+#  overlay the low four words.  Offsets are chosen so that AL=AW[0], AH=AW[1],
+#  etc.  The modrm reg/rm field order (AL CL DL BL AH CH DH BH / AW CW DW BW
+#  SP BP IX IY) is applied by the "attach variables" statements in
+#  vseries_tokens.sinc.
+#      NEC : AW  CW  DW  BW  SP  BP  IX  IY   (Intel: AX CX DX BX SP BP SI DI)
+#      NEC : AL/AH CL/CH DL/DH BL/BH          (8-bit halves - same names as Intel)
+define register offset=0x00 size=2 [ AW CW DW BW SP BP IX IY ];
+define register offset=0x00 size=1 [ AL AH CL CH DL DH BL BH ];
+
+# --------------------------------------------------------------------------
+#  Segment registers (NEC data-book names)
+# --------------------------------------------------------------------------
+#  8086-class segment set only - the V-Series has no FS/GS (which is exactly why
+#  the x86 FS/GS-override bytes 0x64/0x65 are free for the V-Series REPNC/REPC
+#  prefixes).  Field order DS1 PS SS DS0 matches the 2-bit segment selector.
+#    NEC name         Intel name      role
+#    PS   (program segment)   CS       code / program segment
+#    SS   (stack segment)     SS       stack segment
+#    DS0  (data segment 0)    DS       primary data segment
+#    DS1  (data segment 1)    ES       secondary data segment (string dest.)
+#  A memory address is (segment_register << 4) + 16-bit offset  =  20-bit
+#  physical address  [uPD70216 data sheet, "Register Configuration"].
+define register offset=0x10 size=2 [ DS1 PS SS DS0 ];
+
+# --------------------------------------------------------------------------
+#  Program counter (NEC name PC) and program status word (NEC name PSW)
+# --------------------------------------------------------------------------
+#  Hardware: the V-Series program counter PC (Intel name IP) is a 16-bit binary
+#  counter holding the program-segment offset of the next instruction.  There is
+#  NO wider program-counter register in the silicon; the 20-bit physical address
+#  is formed transiently by the bus interface unit as (PS << 4) + PC
+#  [uPD70216 data sheet].
+#  Ghidra: real-mode disassembly runs in a flat 20-bit (4-byte) linear address
+#  space, so the register declared <programcounter> in the .pspec must be 4 bytes
+#  wide to hold a linear instruction address.  We therefore model PC as a 4-byte
+#  register whose low 16 bits are the architectural PC; the high bits are the
+#  Ghidra linear-address artifact (the V-Series has no 32-bit registers).  The
+#  return-address offset that instructions actually push/pop is handled with
+#  local 16-bit temporaries, so no separate 16-bit register is needed.
+#  (Intel x86-16-real models the same thing as EIP/IP.)
+define register offset=0x18 size=4 [ PC ];
+define register offset=0x1c size=2 [ PSW ];   # Intel: FLAGS
+
+# --------------------------------------------------------------------------
+#  Individual flag bits (NEC data-book names)
+# --------------------------------------------------------------------------
+#  NEC name   Intel name   meaning
+#    CY         CF         carry
+#    P          PF         parity
+#    AC         AF         auxiliary carry
+#    Z          ZF         zero
+#    S          SF         sign
+#    BRK        TF         break / single-step
+#    IE         IF         interrupt enable
+#    DIR        DF         direction
+#    V          OF         overflow
+#  The 1-byte offsets within this block mirror the bit positions inside the
+#  packed PSW word (CY=0, P=2, AC=4, Z=6, S=7, BRK=8, IE=9, DIR=10, V=11).
+define register offset=0x20 size=1 [ CY _ P _ AC _ Z S BRK IE DIR V ];
+
+# --------------------------------------------------------------------------
+#  Decode context register
+# --------------------------------------------------------------------------
+#  Backs the "contextreg" context used to carry prefix state (segment override
+#  and the various repeat/lock prefixes) from a prefix byte to the instruction
+#  it modifies.
+define register offset=0x30 size=4 contextreg;
+
+define context contextreg
+  segover    = (0,2)   # segment override: 0=none 1=PS 2=SS 3=DS0 4=DS1
+  rep        = (3,3)   # REP / REPE / REPZ   prefix (0xF3)
+  repne      = (4,4)   # REPNE / REPNZ       prefix (0xF2)
+  repc       = (5,5)   # REPC  prefix (V-Series 0x65) - repeat while CY=1
+  repnc      = (6,6)   # REPNC prefix (V-Series 0x64) - repeat while CY=0
+  lockprefx  = (7,7)   # BUSLOCK prefix (0xF0)
+;
+
+# --------------------------------------------------------------------------
+#  P-code userops
+# --------------------------------------------------------------------------
+#  "segment" computes a 4-byte physical address from a 16-bit segment base and
+#  a 16-bit offset; it is bound to the <segmentop> in the .pspec.  (IN/OUT model
+#  their transfers as accesses to the "io" space, so no pcodeop is needed.)
+define pcodeop segment;

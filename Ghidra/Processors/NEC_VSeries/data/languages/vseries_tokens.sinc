@@ -1,0 +1,148 @@
+# ==========================================================================
+#  NEC V-Series - instruction tokens, register attaches, 16-bit addressing
+# --------------------------------------------------------------------------
+#  Defines the opcode / modrm / immediate tokens, attaches the register fields,
+#  and builds the 16-bit real-mode addressing sub-tables (the eight modrm memory
+#  forms, segment selection with the BP->SS default, and the rm8/rm16
+#  register-or-memory operands).  No SIB byte exists in 16-bit mode.
+#
+#  Register/segment names are the NEC data-book names (AW/BW/IX/IY/PS/DS0/DS1);
+#  the Intel 8086 equivalents are noted in comments for cross-reference.
+#
+#  This file depends on the spaces, registers and "segment" p-code op defined
+#  in vseries_registers.sinc, which must be @included before it.
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+#  Tokens
+# --------------------------------------------------------------------------
+define token opbyte (8)
+  byte      = (0,7)          # whole opcode byte
+  hinyb     = (4,7)          # high nibble
+  page      = (3,3)          # bit 3 (e.g. Jcc page)
+  cond      = (0,3)          # condition code (low nibble of 0x7x / 0x0F 0x8x)
+  dbit      = (1,1)          # ALU "direction" bit (reg<-rm vs rm<-reg)
+  wbit      = (0,0)          # operand size bit: 0 = byte, 1 = word
+  reg8_op   = (0,2)          # 8-bit register encoded in low 3 bits of opcode
+  reg16_op  = (0,2)          # 16-bit register encoded in low 3 bits of opcode
+  sreg_op   = (3,4)          # segment register encoded in opcode bits 3-4
+;
+
+define token modrm (8)
+  mod         = (6,7)
+  reg_opcode  = (3,5)        # reg field: register operand or /digit opcode ext.
+  r_m         = (0,2)
+  reg8        = (3,5)        # 8-bit register in reg field
+  reg16       = (3,5)        # 16-bit register in reg field
+  sreg        = (3,4)        # segment register in reg field (2-bit selector)
+  r8          = (0,2)        # 8-bit register in r/m field (mod=3)
+  r16         = (0,2)        # 16-bit register in r/m field (mod=3)
+;
+
+define token I8 (8)
+  imm8   = (0,7)
+  simm8  = (0,7) signed
+;
+
+define token I16 (16)
+  imm16  = (0,15)
+  simm16 = (0,15) signed
+  j16    = (0,15)          # second immediate word (segment part of a far pointer)
+;
+
+# Separate view of a single byte, used by the prefix constructors so a prefix
+# byte and the following opcode byte can both be read as full bytes.
+define token override (8)
+  over = (0,7)
+;
+
+# --------------------------------------------------------------------------
+#  Register attaches (modrm field ordering; NEC names)
+# --------------------------------------------------------------------------
+#  8-bit halves keep the Intel-shared names AL CL DL BL AH CH DH BH.
+#  16-bit words are the NEC names AW CW DW BW SP BP IX IY (Intel AX CX DX BX
+#  SP BP SI DI).  Segment selector order DS1 PS SS DS0 (Intel ES CS SS DS).
+attach variables [ r8  reg8  reg8_op  ]  [ AL CL DL BL AH CH DH BH ];
+attach variables [ r16 reg16 reg16_op ]  [ AW CW DW BW SP BP IX IY ];
+attach variables [ sreg sreg_op ]        [ DS1 PS SS DS0 ];
+
+# --------------------------------------------------------------------------
+#  Register / immediate operand sub-tables
+# --------------------------------------------------------------------------
+Reg8:   reg8   is reg8    { export reg8; }
+Reg16:  reg16  is reg16   { export reg16; }
+Rmr8:   r8     is r8      { export r8; }
+Rmr16:  r16    is r16     { export r16; }
+SegReg: sreg   is sreg    { export sreg; }
+
+# Sign-extend an 8-bit displacement to the 16-bit offset width.
+simm8_16: simm8 is simm8 { export *[const]:2 simm8; }
+
+# --------------------------------------------------------------------------
+#  16-bit addressing modes - the offset (effective address) portion.
+#  The eight modrm memory forms, each with the optional disp8 / disp16.
+#  (NEC index registers IX/IY = Intel SI/DI; base BW = Intel BX.)
+# --------------------------------------------------------------------------
+addr16: [BW + IX]              is mod=0 & r_m=0 & BW & IX            { local tmp = BW + IX; export tmp; }
+addr16: [BW + IY]              is mod=0 & r_m=1 & BW & IY            { local tmp = BW + IY; export tmp; }
+addr16: [BP + IX]              is mod=0 & r_m=2 & BP & IX            { local tmp = BP + IX; export tmp; }
+addr16: [BP + IY]              is mod=0 & r_m=3 & BP & IY            { local tmp = BP + IY; export tmp; }
+addr16: [IX]                   is mod=0 & r_m=4 & IX                 { export IX; }
+addr16: [IY]                   is mod=0 & r_m=5 & IY                 { export IY; }
+addr16: [imm16]                is mod=0 & r_m=6; imm16               { export *[const]:2 imm16; }
+addr16: [BW]                   is mod=0 & r_m=7 & BW                 { export BW; }
+
+addr16: [BW + IX + simm8_16]   is mod=1 & r_m=0 & BW & IX; simm8_16  { local tmp = BW + IX + simm8_16; export tmp; }
+addr16: [BW + IY + simm8_16]   is mod=1 & r_m=1 & BW & IY; simm8_16  { local tmp = BW + IY + simm8_16; export tmp; }
+addr16: [BP + IX + simm8_16]   is mod=1 & r_m=2 & BP & IX; simm8_16  { local tmp = BP + IX + simm8_16; export tmp; }
+addr16: [BP + IY + simm8_16]   is mod=1 & r_m=3 & BP & IY; simm8_16  { local tmp = BP + IY + simm8_16; export tmp; }
+addr16: [IX + simm8_16]        is mod=1 & r_m=4 & IX; simm8_16       { local tmp = IX + simm8_16; export tmp; }
+addr16: [IY + simm8_16]        is mod=1 & r_m=5 & IY; simm8_16       { local tmp = IY + simm8_16; export tmp; }
+addr16: [BP + simm8_16]        is mod=1 & r_m=6 & BP; simm8_16       { local tmp = BP + simm8_16; export tmp; }
+addr16: [BW + simm8_16]        is mod=1 & r_m=7 & BW; simm8_16       { local tmp = BW + simm8_16; export tmp; }
+
+addr16: [BW + IX + imm16]      is mod=2 & r_m=0 & BW & IX; imm16     { local tmp = BW + IX + imm16; export tmp; }
+addr16: [BW + IY + imm16]      is mod=2 & r_m=1 & BW & IY; imm16     { local tmp = BW + IY + imm16; export tmp; }
+addr16: [BP + IX + imm16]      is mod=2 & r_m=2 & BP & IX; imm16     { local tmp = BP + IX + imm16; export tmp; }
+addr16: [BP + IY + imm16]      is mod=2 & r_m=3 & BP & IY; imm16     { local tmp = BP + IY + imm16; export tmp; }
+addr16: [IX + imm16]           is mod=2 & r_m=4 & IX; imm16          { local tmp = IX + imm16; export tmp; }
+addr16: [IY + imm16]           is mod=2 & r_m=5 & IY; imm16          { local tmp = IY + imm16; export tmp; }
+addr16: [BP + imm16]           is mod=2 & r_m=6 & BP; imm16          { local tmp = BP + imm16; export tmp; }
+addr16: [BW + imm16]           is mod=2 & r_m=7 & BW; imm16          { local tmp = BW + imm16; export tmp; }
+
+# --------------------------------------------------------------------------
+#  Segment selection.
+#  With no override (segover=0) the default segment is DS0, except for BP-based
+#  effective addresses, which default to SS (handled in the Mem16 forms below).
+#  Override prefixes: PS:=0x2E  SS:=0x36  DS0:=0x3E  DS1:=0x26.
+# --------------------------------------------------------------------------
+seg16:       is segover=0         { export DS0; }
+seg16: PS:   is segover=1 & PS    { export PS; }
+seg16: SS:   is segover=2 & SS    { export SS; }
+seg16: DS0:  is segover=3 & DS0   { export DS0; }
+seg16: DS1:  is segover=4 & DS1   { export DS1; }
+
+# --------------------------------------------------------------------------
+#  Mem16: full 16-bit memory reference = segment(seg, offset), giving a 4-byte
+#  physical address.  The first group covers the BP-based forms that default to
+#  SS when no override is present; the final form applies the selected segment
+#  (default DS0 or an explicit override) to every other case.
+# --------------------------------------------------------------------------
+Mem16: addr16  is (segover=0 & mod=0 & r_m=2) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+IX]
+Mem16: addr16  is (segover=0 & mod=0 & r_m=3) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+IY]
+Mem16: addr16  is (segover=0 & mod=1 & r_m=2) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+IX+d8]
+Mem16: addr16  is (segover=0 & mod=1 & r_m=3) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+IY+d8]
+Mem16: addr16  is (segover=0 & mod=1 & r_m=6) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+d8]
+Mem16: addr16  is (segover=0 & mod=2 & r_m=2) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+IX+d16]
+Mem16: addr16  is (segover=0 & mod=2 & r_m=3) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+IY+d16]
+Mem16: addr16  is (segover=0 & mod=2 & r_m=6) ... & addr16   { tmp:4 = segment(SS,addr16); export tmp; }  # [BP+d16]
+Mem16: seg16^addr16  is seg16 ; addr16                       { tmp:4 = segment(seg16,addr16); export tmp; }
+
+# --------------------------------------------------------------------------
+#  rm8 / rm16 : register (mod=3) or memory operand.
+# --------------------------------------------------------------------------
+rm8:  Rmr8            is mod=3 & Rmr8   { export Rmr8; }
+rm8:  "byte ptr" Mem16 is Mem16         { export *:1 Mem16; }
+
+rm16: Rmr16           is mod=3 & Rmr16  { export Rmr16; }
+rm16: "word ptr" Mem16 is Mem16         { export *:2 Mem16; }

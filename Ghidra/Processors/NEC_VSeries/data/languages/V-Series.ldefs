@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<language_definitions>
+  <!-- All four variants share one instruction set (one vseries.sla); they
+       differ only in their .pspec.  V20/V30 are CPU-only; V40/V50 add on-chip
+       peripheral SFRs.  The external data-bus width (8- vs 16-bit) is a
+       hardware detail invisible to the disassembler. -->
+  <language processor="V-Series"
+            endian="little"
+            size="16"
+            variant="V20"
+            version="1.0"
+            slafile="vseries.sla"
+            processorspec="V20.pspec"
+            id="V-Series:LE:16:V20">
+    <description>NEC V20 (uPD70108) - 8088-compatible enhanced core, CPU only, 16-bit real mode</description>
+    <compiler name="default" spec="V-Series.cspec" id="default"/>
+    <external_name tool="IDA-PRO" name="80186"/>
+  </language>
+  <language processor="V-Series"
+            endian="little"
+            size="16"
+            variant="V30"
+            version="1.0"
+            slafile="vseries.sla"
+            processorspec="V30.pspec"
+            id="V-Series:LE:16:V30">
+    <description>NEC V30 (uPD70116) - 8086-compatible enhanced core, CPU only, 16-bit real mode</description>
+    <compiler name="default" spec="V-Series.cspec" id="default"/>
+    <external_name tool="IDA-PRO" name="80186"/>
+  </language>
+  <language processor="V-Series"
+            endian="little"
+            size="16"
+            variant="V40"
+            version="1.0"
+            slafile="vseries.sla"
+            processorspec="V40.pspec"
+            id="V-Series:LE:16:V40">
+    <description>NEC V40 (uPD70208) - V20-compatible core + peripherals, 16-bit real mode</description>
+    <compiler name="default" spec="V-Series.cspec" id="default"/>
+    <external_name tool="IDA-PRO" name="80186"/>
+  </language>
+  <language processor="V-Series"
+            endian="little"
+            size="16"
+            variant="V50"
+            version="1.0"
+            slafile="vseries.sla"
+            processorspec="V50.pspec"
+            id="V-Series:LE:16:V50">
+    <description>NEC V50 (uPD70216) - V30-compatible core + peripherals, 16-bit real mode</description>
+    <compiler name="default" spec="V-Series.cspec" id="default"/>
+    <external_name tool="IDA-PRO" name="80186"/>
+  </language>
+</language_definitions>

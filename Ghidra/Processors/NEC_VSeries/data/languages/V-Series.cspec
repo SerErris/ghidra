@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- NEC V-Series 16-bit segmented (real-mode) calling conventions.
+     Modeled on Ghidra's x86-16.cspec: stack-based parameters, return in AW
+     (16-bit) or DW:AW (32-bit), near and far variants. -->
+<compiler_spec>
+
+  <data_organization>
+    <absolute_max_alignment value="0"/>
+    <machine_alignment value="2"/>
+    <default_alignment value="1"/>
+    <default_pointer_alignment value="2"/>
+    <pointer_size value="2"/>
+    <wchar_size value="2"/>
+    <short_size value="2"/>
+    <integer_size value="2"/>
+    <long_size value="4"/>
+    <long_long_size value="4"/>
+    <float_size value="4"/>
+    <double_size value="8"/>
+    <long_double_size value="10"/>
+  </data_organization>
+
+  <global>
+    <range space="ram"/>
+  </global>
+  <stackpointer register="SP" space="ram"/>
+
+  <default_proto>
+    <prototype name="__stdcall16near" extrapop="unknown" stackshift="2">
+      <input>
+        <pentry minsize="1" maxsize="500" align="2">
+          <addr offset="2" space="stack"/>
+        </pentry>
+      </input>
+      <output>
+        <pentry minsize="1" maxsize="2">
+          <register name="AW"/>
+        </pentry>
+        <pentry minsize="3" maxsize="4">
+          <addr space="join" piece1="DW" piece2="AW"/>
+        </pentry>
+      </output>
+      <unaffected>
+        <register name="SP"/>
+        <register name="BP"/>
+        <register name="IX"/>
+        <register name="IY"/>
+        <register name="DS0"/>
+        <register name="PS"/>
+        <register name="DS1"/>
+        <register name="SS"/>
+        <register name="DIR"/>
+      </unaffected>
+    </prototype>
+  </default_proto>
+
+  <prototype name="__cdecl16near" extrapop="2" stackshift="2">
+    <input>
+      <pentry minsize="1" maxsize="500" align="2">
+        <addr offset="2" space="stack"/>
+      </pentry>
+    </input>
+    <output>
+      <pentry minsize="1" maxsize="2">
+        <register name="AW"/>
+      </pentry>
+      <pentry minsize="3" maxsize="4">
+        <addr space="join" piece1="DW" piece2="AW"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <register name="SP"/>
+      <register name="BP"/>
+      <register name="IX"/>
+      <register name="IY"/>
+      <register name="DS0"/>
+      <register name="PS"/>
+      <register name="DS1"/>
+      <register name="SS"/>
+      <register name="DIR"/>
+    </unaffected>
+  </prototype>
+
+  <prototype name="__stdcall16far" extrapop="unknown" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="500" align="2">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output>
+      <pentry minsize="1" maxsize="2">
+        <register name="AW"/>
+      </pentry>
+      <pentry minsize="3" maxsize="4">
+        <addr space="join" piece1="DW" piece2="AW"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <register name="SP"/>
+      <register name="BP"/>
+      <register name="IX"/>
+      <register name="IY"/>
+      <register name="DS0"/>
+      <register name="PS"/>
+      <register name="DS1"/>
+      <register name="SS"/>
+      <register name="DIR"/>
+    </unaffected>
+  </prototype>
+
+  <prototype name="__cdecl16far" extrapop="4" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="500" align="2">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output>
+      <pentry minsize="1" maxsize="2">
+        <register name="AW"/>
+      </pentry>
+      <pentry minsize="3" maxsize="4">
+        <addr space="join" piece1="DW" piece2="AW"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <register name="SP"/>
+      <register name="BP"/>
+      <register name="IX"/>
+      <register name="IY"/>
+      <register name="DS0"/>
+      <register name="PS"/>
+      <register name="DS1"/>
+      <register name="SS"/>
+      <register name="DIR"/>
+    </unaffected>
+  </prototype>
+
+</compiler_spec>

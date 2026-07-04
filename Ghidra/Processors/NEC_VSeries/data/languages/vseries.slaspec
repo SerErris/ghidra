@@ -1,0 +1,12 @@
+# ==========================================================================
+#  NEC V-Series (V20/V30/V40/V50) - SLEIGH specification
+# --------------------------------------------------------------------------
+#  16-bit real mode.  One spec, compiled to vseries.sla, shared by every
+#  variant; the parts differ only in their .pspec / .ldefs.  See the .sinc
+#  files for the register model, tokens/addressing, and instruction layers.
+# ==========================================================================
+@include "vseries_registers.sinc"
+@include "vseries_tokens.sinc"
+@include "vseries_8086.sinc"
+@include "vseries_80186.sinc"
+@include "vseries_nec.sinc"
