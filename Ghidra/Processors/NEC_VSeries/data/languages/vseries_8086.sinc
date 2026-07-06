@@ -197,21 +197,17 @@ dseSI2: seg16^"[IX]"  is seg16    { local p:4 = segment(seg16,IX); IX = IX + 2 -
 eseDI1: "DS1:[IY]"     is epsilon  { local p:4 = segment(DS1,IY); IY = IY + 1 - 2*zext(DIR); export *:1 p; }
 eseDI2: "DS1:[IY]"     is epsilon  { local p:4 = segment(DS1,IY); IY = IY + 2 - 4*zext(DIR); export *:2 p; }
 
-# Repeat-prefix helpers.  "rep"/"reptail" implement the CW-counted repeat used
-# by MOVBK/STM/LDM; "repe"/"repetail" add the Z condition used by CMPBK/CMPM.
-repPfx:          is rep=0 & repne=0 { }
-repPfx: ".rep"   is rep=1           { if (CW==0) goto inst_next; CW = CW - 1; }
-repPfx: ".repne" is rep=0 & repne=1 { if (CW==0) goto inst_next; CW = CW - 1; }
-repEnd:      is rep=0 & repne=0 { }
-repEnd:      is rep=1           { goto inst_start; }
-repEnd:      is rep=0 & repne=1 { goto inst_start; }
-
-repePfx:          is rep=0 & repne=0 { }
-repePfx: ".repe"  is rep=1           { if (CW==0) goto inst_next; CW = CW - 1; }
-repePfx: ".repne" is rep=0 & repne=1 { if (CW==0) goto inst_next; CW = CW - 1; }
-repeEnd:      is rep=0 & repne=0 { }
-repeEnd:      is rep=1           { if (Z!=0) goto inst_start; }   # REPE: repeat while equal
-repeEnd:      is rep=0 & repne=1 { if (Z==0) goto inst_start; }   # REPNE: repeat while not equal
+# Repeat-prefix helpers.  In NEC assembler form the repeat prefix is a leading
+# mnemonic word (REP / REPE / REPNE) that precedes the block op, e.g.
+# "REP MOVBKW" (uPD70216 data book p.62).  SLEIGH always treats the FIRST print
+# piece of a constructor as the literal mnemonic, so the leading prefix word must
+# be a literal too -- hence the block ops below use explicit per-prefix
+# constructor variants ("MOVBKW" / "REP MOVBKW" / ...) rather than a leading
+# subtable.  The "repEntry" macro does the CW==0 skip and decrement at the head;
+# each prefixed constructor closes the loop inline at the tail ("goto inst_start",
+# Z-conditioned for CMPBK/CMPM).  REP pairs with MOVBK/STM/LDM (unconditional CW
+# count); REPE/REPNE pair with CMPBK/CMPM (terminate early on the Z flag).
+macro repEntry() { if (CW==0) goto inst_next; CW = CW - 1; }
 
 # ==========================================================================
 #  Data transfer - MOV  (Intel: MOV)
@@ -490,16 +486,42 @@ ioP8: imm8 is imm8 { export *[const]:2 imm8; }
 # ==========================================================================
 #  Block transfer (string) - MOVBK/CMPBK/CMPM/LDM/STM
 # ==========================================================================
-:MOVBK^repPfx^repEnd eseDI1,dseSI1 is repPfx & repEnd & byte=0xa4 & eseDI1 & dseSI1 { build repPfx; build eseDI1; build dseSI1; eseDI1 = dseSI1; build repEnd; }
-:MOVBK^repPfx^repEnd eseDI2,dseSI2 is repPfx & repEnd & byte=0xa5 & eseDI2 & dseSI2 { build repPfx; build eseDI2; build dseSI2; eseDI2 = dseSI2; build repEnd; }
-:STM^repPfx^repEnd eseDI1 is repPfx & repEnd & byte=0xaa & eseDI1 { build repPfx; build eseDI1; eseDI1 = AL; build repEnd; }
-:STM^repPfx^repEnd eseDI2 is repPfx & repEnd & byte=0xab & eseDI2 { build repPfx; build eseDI2; eseDI2 = AW; build repEnd; }
-:LDM^repPfx^repEnd dseSI1 is repPfx & repEnd & byte=0xac & dseSI1 { build repPfx; build dseSI1; AL = dseSI1; build repEnd; }
-:LDM^repPfx^repEnd dseSI2 is repPfx & repEnd & byte=0xad & dseSI2 { build repPfx; build dseSI2; AW = dseSI2; build repEnd; }
-:CMPBK^repePfx^repeEnd dseSI1,eseDI1 is repePfx & repeEnd & byte=0xa6 & dseSI1 & eseDI1 { build repePfx; build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); build repeEnd; }
-:CMPBK^repePfx^repeEnd dseSI2,eseDI2 is repePfx & repeEnd & byte=0xa7 & dseSI2 & eseDI2 { build repePfx; build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); build repeEnd; }
-:CMPM^repePfx^repeEnd eseDI1 is repePfx & repeEnd & byte=0xae & eseDI1 { build repePfx; build eseDI1; local d:1 = eseDI1; doCMP(AL,d); build repeEnd; }
-:CMPM^repePfx^repeEnd eseDI2 is repePfx & repeEnd & byte=0xaf & eseDI2 { build repePfx; build eseDI2; local d:2 = eseDI2; doCMP(AW,d); build repeEnd; }
+# MOVBK (block move, DS0:IX -> DS1:IY).  REP/REPNE both act as an unconditional
+# CW-counted repeat here (NEC pairs REPNE only with CMPBK/CMPM, but a stray F2
+# must still decode); both display as "REP".
+:"MOVBKB" eseDI1,dseSI1     is rep=0 & repne=0 & byte=0xa4 & eseDI1 & dseSI1 { build eseDI1; build dseSI1; eseDI1 = dseSI1; }
+:"MOVBKW" eseDI2,dseSI2     is rep=0 & repne=0 & byte=0xa5 & eseDI2 & dseSI2 { build eseDI2; build dseSI2; eseDI2 = dseSI2; }
+:"REP MOVBKB" eseDI1,dseSI1 is (rep=1 | repne=1) & byte=0xa4 & eseDI1 & dseSI1 { repEntry(); build eseDI1; build dseSI1; eseDI1 = dseSI1; goto inst_start; }
+:"REP MOVBKW" eseDI2,dseSI2 is (rep=1 | repne=1) & byte=0xa5 & eseDI2 & dseSI2 { repEntry(); build eseDI2; build dseSI2; eseDI2 = dseSI2; goto inst_start; }
+
+# STM (store block, AL/AW -> DS1:IY).
+:"STMB" eseDI1     is rep=0 & repne=0 & byte=0xaa & eseDI1 { build eseDI1; eseDI1 = AL; }
+:"STMW" eseDI2     is rep=0 & repne=0 & byte=0xab & eseDI2 { build eseDI2; eseDI2 = AW; }
+:"REP STMB" eseDI1 is (rep=1 | repne=1) & byte=0xaa & eseDI1 { repEntry(); build eseDI1; eseDI1 = AL; goto inst_start; }
+:"REP STMW" eseDI2 is (rep=1 | repne=1) & byte=0xab & eseDI2 { repEntry(); build eseDI2; eseDI2 = AW; goto inst_start; }
+
+# LDM (load block, DS0:IX -> AL/AW).
+:"LDMB" dseSI1     is rep=0 & repne=0 & byte=0xac & dseSI1 { build dseSI1; AL = dseSI1; }
+:"LDMW" dseSI2     is rep=0 & repne=0 & byte=0xad & dseSI2 { build dseSI2; AW = dseSI2; }
+:"REP LDMB" dseSI1 is (rep=1 | repne=1) & byte=0xac & dseSI1 { repEntry(); build dseSI1; AL = dseSI1; goto inst_start; }
+:"REP LDMW" dseSI2 is (rep=1 | repne=1) & byte=0xad & dseSI2 { repEntry(); build dseSI2; AW = dseSI2; goto inst_start; }
+
+# CMPBK (compare block, DS0:IX vs DS1:IY).  REPE (F3) repeats while equal;
+# REPNE (F2) repeats while not equal -- both terminate early on the Z flag.
+:"CMPBKB" dseSI1,eseDI1       is rep=0 & repne=0 & byte=0xa6 & dseSI1 & eseDI1 { build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); }
+:"CMPBKW" dseSI2,eseDI2       is rep=0 & repne=0 & byte=0xa7 & dseSI2 & eseDI2 { build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); }
+:"REPE CMPBKB" dseSI1,eseDI1  is rep=1 & byte=0xa6 & dseSI1 & eseDI1 { repEntry(); build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); if (Z!=0) goto inst_start; }
+:"REPE CMPBKW" dseSI2,eseDI2  is rep=1 & byte=0xa7 & dseSI2 & eseDI2 { repEntry(); build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); if (Z!=0) goto inst_start; }
+:"REPNE CMPBKB" dseSI1,eseDI1 is rep=0 & repne=1 & byte=0xa6 & dseSI1 & eseDI1 { repEntry(); build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); if (Z==0) goto inst_start; }
+:"REPNE CMPBKW" dseSI2,eseDI2 is rep=0 & repne=1 & byte=0xa7 & dseSI2 & eseDI2 { repEntry(); build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); if (Z==0) goto inst_start; }
+
+# CMPM (compare block against AL/AW, i.e. Intel SCAS).
+:"CMPMB" eseDI1       is rep=0 & repne=0 & byte=0xae & eseDI1 { build eseDI1; local d:1 = eseDI1; doCMP(AL,d); }
+:"CMPMW" eseDI2       is rep=0 & repne=0 & byte=0xaf & eseDI2 { build eseDI2; local d:2 = eseDI2; doCMP(AW,d); }
+:"REPE CMPMB" eseDI1  is rep=1 & byte=0xae & eseDI1 { repEntry(); build eseDI1; local d:1 = eseDI1; doCMP(AL,d); if (Z!=0) goto inst_start; }
+:"REPE CMPMW" eseDI2  is rep=1 & byte=0xaf & eseDI2 { repEntry(); build eseDI2; local d:2 = eseDI2; doCMP(AW,d); if (Z!=0) goto inst_start; }
+:"REPNE CMPMB" eseDI1 is rep=0 & repne=1 & byte=0xae & eseDI1 { repEntry(); build eseDI1; local d:1 = eseDI1; doCMP(AL,d); if (Z==0) goto inst_start; }
+:"REPNE CMPMW" eseDI2 is rep=0 & repne=1 & byte=0xaf & eseDI2 { repEntry(); build eseDI2; local d:2 = eseDI2; doCMP(AW,d); if (Z==0) goto inst_start; }
 
 # ==========================================================================
 #  Control transfer - BR (JMP) / CALL / RET

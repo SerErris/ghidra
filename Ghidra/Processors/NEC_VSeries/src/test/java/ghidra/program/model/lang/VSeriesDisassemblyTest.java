@@ -163,20 +163,25 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 
 	@Test
 	public void test_stringBlock() throws Exception {
-		assertDisassembly("a4", "MOVBK DS1:[IY],[IX]");
-		assertDisassembly("a5", "MOVBK DS1:[IY],[IX]");
-		assertDisassembly("a6", "CMPBK [IX],DS1:[IY]");
-		assertDisassembly("ae", "CMPM DS1:[IY]");
-		assertDisassembly("ac", "LDM [IX]");
-		assertDisassembly("aa", "STM DS1:[IY]");
-		assertDisassembly("64a6", "CMPBK [IX],DS1:[IY]");
-		assertDisassembly("65a7", "CMPBK [IX],DS1:[IY]");
+		// Byte/word variants carry the NEC size suffix (B/W) so the two opcodes
+		// are distinguishable in the listing.
+		assertDisassembly("a4", "MOVBKB DS1:[IY],[IX]");
+		assertDisassembly("a5", "MOVBKW DS1:[IY],[IX]");
+		assertDisassembly("a6", "CMPBKB [IX],DS1:[IY]");
+		assertDisassembly("ae", "CMPMB DS1:[IY]");
+		assertDisassembly("ac", "LDMB [IX]");
+		assertDisassembly("aa", "STMB DS1:[IY]");
+		// REPNC (64) / REPC (65) prefix bytes are consumed but not displayed.
+		assertDisassembly("64a6", "CMPBKB [IX],DS1:[IY]");
+		assertDisassembly("65a7", "CMPBKW [IX],DS1:[IY]");
 	}
 
 	@Test
 	public void test_stringRepeatPrefix() throws Exception {
-		assertDisassembly("f3a4", "MOVBK.rep DS1:[IY],[IX]");
-		assertDisassembly("f2a6", "CMPBK.repne [IX],DS1:[IY]");
+		// The repeat prefix is rendered as a leading NEC mnemonic word (REP for
+		// MOVBK/STM/LDM, REPE/REPNE for CMPBK/CMPM), matching the uPD70216 form.
+		assertDisassembly("f3a4", "REP MOVBKB DS1:[IY],[IX]");
+		assertDisassembly("f2a6", "REPNE CMPBKB [IX],DS1:[IY]");
 	}
 
 	@Test
@@ -187,10 +192,10 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 		assertDisassembly("ed", "IN AW,DW");
 		assertDisassembly("ee", "OUT DW,AL");
 		assertDisassembly("ef", "OUT DW,AW");
-		assertDisassembly("6c", "INM DS1:[IY],DW");
-		assertDisassembly("6d", "INM DS1:[IY],DW");
-		assertDisassembly("6e", "OUTM DW,[IX]");
-		assertDisassembly("6f", "OUTM DW,[IX]");
+		assertDisassembly("6c", "INMB DS1:[IY],DW");
+		assertDisassembly("6d", "INMW DS1:[IY],DW");
+		assertDisassembly("6e", "OUTMB DW,[IX]");
+		assertDisassembly("6f", "OUTMW DW,[IX]");
 	}
 
 	@Test

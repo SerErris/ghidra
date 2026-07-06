@@ -65,10 +65,10 @@
 # --------------------------------------------------------------------------
 #  Block I/O  INM / OUTM  (Intel: INS / OUTS)
 # --------------------------------------------------------------------------
-:INM eseDI1,DW is byte=0x6c & eseDI1 & DW { eseDI1 = *[io]:1 DW; }
-:INM eseDI2,DW is byte=0x6d & eseDI2 & DW { eseDI2 = *[io]:2 DW; }
-:OUTM DW,dseSI1 is byte=0x6e & dseSI1 & DW { *[io]:1 DW = dseSI1; }
-:OUTM DW,dseSI2 is byte=0x6f & dseSI2 & DW { *[io]:2 DW = dseSI2; }
+:INMB eseDI1,DW is byte=0x6c & eseDI1 & DW { eseDI1 = *[io]:1 DW; }
+:INMW eseDI2,DW is byte=0x6d & eseDI2 & DW { eseDI2 = *[io]:2 DW; }
+:OUTMB DW,dseSI1 is byte=0x6e & dseSI1 & DW { *[io]:1 DW = dseSI1; }
+:OUTMW DW,dseSI2 is byte=0x6f & dseSI2 & DW { *[io]:2 DW = dseSI2; }
 
 # --------------------------------------------------------------------------
 #  CHKIND  (Intel: BOUND)
