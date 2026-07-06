@@ -538,7 +538,11 @@ ioP8: imm8 is imm8 { export *[const]:2 imm8; }
 
 :CALL rel16  is byte=0xe8; rel16 { push16(&:2 inst_next); call rel16; }
 :CALL rm16   is byte=0xff; rm16 & reg_opcode=2 ... { push16(&:2 inst_next); call [rm16]; }  # near indirect
-:CALL farptr is byte=0x9a; farptr { push16(PS); push16(&:2 inst_next); call farptr; }       # CALL FAR seg:off
+# CALL FAR seg:off.  farptr's own action assigns PS=newseg, so it must be built
+# AFTER the pushes -- otherwise the implicit (start-of-body) build would load the
+# new segment before push16(PS), pushing the callee segment instead of the
+# caller's return CS.  Explicit "build farptr" pins PS=newseg after push16(PS).
+:CALL farptr is byte=0x9a; farptr { push16(PS); push16(&:2 inst_next); build farptr; call farptr; }
 :CALL addr16 is byte=0xff; addr16 & reg_opcode=3 ... {                                       # far indirect
   local base:4 = segment(DS0, addr16);
   local off:2 = *:2 base;  local seg:2 = *:2 (base + 2);

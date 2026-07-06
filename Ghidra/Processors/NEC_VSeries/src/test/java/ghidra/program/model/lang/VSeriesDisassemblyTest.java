@@ -16,6 +16,7 @@
 package ghidra.program.model.lang;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.*;
 
@@ -24,6 +25,8 @@ import ghidra.app.util.PseudoInstruction;
 import ghidra.program.database.ProgramBuilder;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.Varnode;
 import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
 
 /**
@@ -211,6 +214,53 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 		assertDisassembly("c20400", "RET 0x4");
 		assertDisassembly("cb", "RET");
 		assertDisassembly("ca0400", "RET 0x4");
+	}
+
+	/**
+	 * Regression guard for the far-call (CALLF, opcode 0x9A) return-segment bug:
+	 * the instruction must push the caller's OLD code segment (PS) before loading
+	 * the new segment, so a matching RETF returns to the caller.  The earlier bug
+	 * reassigned PS via the far-pointer operand's implicit build before the push,
+	 * pushing the callee segment instead.
+	 */
+	@Test
+	public void test_farCallPushesOldSegmentBeforeReassign() throws Exception {
+		programBuilder.setBytes(ADDR, "9aa12ab7b0"); // CALL FAR B0B7:2AA1
+		Address a = program.getAddressFactory().getAddress(ADDR);
+		PseudoInstruction instr = disassembler.disassemble(a);
+		assertEquals("CALL 0xb000:3611", instr.toString());
+
+		Address psAddr = program.getRegister("PS").getAddress();
+		PcodeOp[] ops = instr.getPcode();
+
+		int firstStore = -1;
+		int psReassign = -1;
+		for (int i = 0; i < ops.length; i++) {
+			if (firstStore < 0 && ops[i].getOpcode() == PcodeOp.STORE) {
+				firstStore = i;
+			}
+			Varnode out = ops[i].getOutput();
+			if (psReassign < 0 && out != null && out.getAddress().equals(psAddr)) {
+				psReassign = i;
+			}
+		}
+		assertTrue("expected a stack STORE", firstStore >= 0);
+		assertTrue("expected PS to be reassigned", psReassign >= 0);
+		assertTrue("old segment must be pushed before PS is reassigned",
+			firstStore < psReassign);
+
+		// The first push must store the OLD PS -- a value copied from the PS
+		// register -- not the new-segment constant.
+		Varnode stored = ops[firstStore].getInput(2);
+		boolean fromOldPs = false;
+		for (int i = 0; i < firstStore; i++) {
+			Varnode out = ops[i].getOutput();
+			if (out != null && out.equals(stored) && ops[i].getOpcode() == PcodeOp.COPY
+					&& ops[i].getInput(0).getAddress().equals(psAddr)) {
+				fromOldPs = true;
+			}
+		}
+		assertTrue("first push must store the caller's old PS", fromOldPs);
 	}
 
 	@Test
