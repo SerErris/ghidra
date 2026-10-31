@@ -99,6 +99,19 @@ define register offset=0x20 size=1 [ CY _ P _ AC _ Z S BRK IE DIR V ];
 #  Backs the "contextreg" context used to carry prefix state (segment override
 #  and the various repeat/lock prefixes) from a prefix byte to the instruction
 #  it modifies.
+#
+#  It also carries the program segment (PS, Intel CS) the code at an address
+#  executes under.  Near relative branches wrap their 16-bit offset inside the
+#  current code segment, so their target depends on PS, which is not part of
+#  the instruction bytes:
+#    psknown=0  PS unknown: the target wraps inside the 64K page of the linear
+#               address (exact only for PS=X000).
+#    psknown=1  PS = psbase: the target is (psbase<<4) + ((pc + disp) & 0xFFFF),
+#               where pc is the offset of the next instruction within PS.
+#  Both fields flow, so a value set at a function entry reaches every
+#  instruction and near branch/call target disassembled from there.  Far
+#  CALL/BR (9A/EA) set them at their target automatically (see farptr); they
+#  can also be set by hand for an address range (Set Register Values).
 define register offset=0x30 size=4 contextreg;
 
 define context contextreg
@@ -108,6 +121,8 @@ define context contextreg
   repc       = (5,5)   # REPC  prefix (V-Series 0x65) - repeat while CY=1
   repnc      = (6,6)   # REPNC prefix (V-Series 0x64) - repeat while CY=0
   lockprefx  = (7,7)   # BUSLOCK prefix (0xF0)
+  psknown    = (8,8)   # 1 = psbase holds the PS this code runs under
+  psbase     = (9,24)  # PS (paragraph) for near-branch target computation
 ;
 
 # --------------------------------------------------------------------------

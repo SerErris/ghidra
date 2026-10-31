@@ -65,10 +65,28 @@
 # --------------------------------------------------------------------------
 #  Block I/O  INM / OUTM  (Intel: INS / OUTS)
 # --------------------------------------------------------------------------
-:INMB eseDI1,DW is byte=0x6c & eseDI1 & DW { eseDI1 = *[io]:1 DW; }
-:INMW eseDI2,DW is byte=0x6d & eseDI2 & DW { eseDI2 = *[io]:2 DW; }
-:OUTMB DW,dseSI1 is byte=0x6e & dseSI1 & DW { *[io]:1 DW = dseSI1; }
-:OUTMW DW,dseSI2 is byte=0x6f & dseSI2 & DW { *[io]:2 DW = dseSI2; }
+#  "These instructions are used to output or input a string to or from memory,
+#  when preceded by a repeat prefix" (uPD70116 data sheet p.3.78).  Prefix
+#  selection and loop shape as for MOVBK (see vseries_8086.sinc): REP/REPNE =
+#  CW-counted; REPC/REPNC additionally stop on CY (MAME applies them to INM/OUTM
+#  too).  The B/W size suffix follows MAME's NEC disassembler (inmb/inmw/outmb/
+#  outmw); the data sheet writes INM dst,DW / OUTM DW,src.
+:INMB eseDI1,DW          is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0x6c & eseDI1 & DW { build eseDI1; eseDI1 = *[io]:1 DW; }
+:INMW eseDI2,DW          is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0x6d & eseDI2 & DW { build eseDI2; eseDI2 = *[io]:2 DW; }
+:OUTMB DW,dseSI1         is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0x6e & dseSI1 & DW { build dseSI1; *[io]:1 DW = dseSI1; }
+:OUTMW DW,dseSI2         is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0x6f & dseSI2 & DW { build dseSI2; *[io]:2 DW = dseSI2; }
+:"REP INMB" eseDI1,DW    is (rep=1 | repne=1) & byte=0x6c & eseDI1 & DW { repEntry(); build eseDI1; eseDI1 = *[io]:1 DW; goto inst_start; }
+:"REP INMW" eseDI2,DW    is (rep=1 | repne=1) & byte=0x6d & eseDI2 & DW { repEntry(); build eseDI2; eseDI2 = *[io]:2 DW; goto inst_start; }
+:"REP OUTMB" DW,dseSI1   is (rep=1 | repne=1) & byte=0x6e & dseSI1 & DW { repEntry(); build dseSI1; *[io]:1 DW = dseSI1; goto inst_start; }
+:"REP OUTMW" DW,dseSI2   is (rep=1 | repne=1) & byte=0x6f & dseSI2 & DW { repEntry(); build dseSI2; *[io]:2 DW = dseSI2; goto inst_start; }
+:"REPC INMB" eseDI1,DW   is rep=0 & repne=0 & repc=1 & byte=0x6c & eseDI1 & DW { repEntry(); build eseDI1; eseDI1 = *[io]:1 DW; if (CY!=0) goto inst_start; }
+:"REPC INMW" eseDI2,DW   is rep=0 & repne=0 & repc=1 & byte=0x6d & eseDI2 & DW { repEntry(); build eseDI2; eseDI2 = *[io]:2 DW; if (CY!=0) goto inst_start; }
+:"REPC OUTMB" DW,dseSI1  is rep=0 & repne=0 & repc=1 & byte=0x6e & dseSI1 & DW { repEntry(); build dseSI1; *[io]:1 DW = dseSI1; if (CY!=0) goto inst_start; }
+:"REPC OUTMW" DW,dseSI2  is rep=0 & repne=0 & repc=1 & byte=0x6f & dseSI2 & DW { repEntry(); build dseSI2; *[io]:2 DW = dseSI2; if (CY!=0) goto inst_start; }
+:"REPNC INMB" eseDI1,DW  is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0x6c & eseDI1 & DW { repEntry(); build eseDI1; eseDI1 = *[io]:1 DW; if (CY==0) goto inst_start; }
+:"REPNC INMW" eseDI2,DW  is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0x6d & eseDI2 & DW { repEntry(); build eseDI2; eseDI2 = *[io]:2 DW; if (CY==0) goto inst_start; }
+:"REPNC OUTMB" DW,dseSI1 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0x6e & dseSI1 & DW { repEntry(); build dseSI1; *[io]:1 DW = dseSI1; if (CY==0) goto inst_start; }
+:"REPNC OUTMW" DW,dseSI2 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0x6f & dseSI2 & DW { repEntry(); build dseSI2; *[io]:2 DW = dseSI2; if (CY==0) goto inst_start; }
 
 # --------------------------------------------------------------------------
 #  CHKIND  (Intel: BOUND)

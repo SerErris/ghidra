@@ -164,25 +164,41 @@ macro doNEG(dst) {
 :^instruction is over=0x65; instruction [ repc=1;   ] { }    # REPC  (V-Series)
 :^instruction is over=0xf2; instruction [ repne=1; rep=0; ] { }  # REPNE/REPNZ
 :^instruction is over=0xf3; instruction [ rep=1; repne=0; ] { }  # REP/REPE/REPZ
-:^instruction is over=0xf0; instruction [ lockprefx=1; ] { }     # BUSLOCK (LOCK)
+# BUSLOCK (Intel LOCK) is displayed as a leading word, "BUSLOCK XCH ..." (uPD70116
+# data sheet lists BUSLOCK as a CPU control instruction of its own, opcode F0).
+:"BUSLOCK "^instruction is over=0xf0; instruction [ lockprefx=1; ] { }
 
 # ==========================================================================
 #  Branch-target and far-pointer operands
 # ==========================================================================
 #  Near relative branches add the displacement to the 16-bit offset only; the
 #  result wraps within the 64K code segment (the segment base is unchanged).
-#  We model that by wrapping the low 16 bits of the linear address and keeping
-#  the segment-page bits: ((inst_next>>16)<<16) | ((inst_next+disp) & 0xFFFF).
-#  This is exact for 64K-aligned segments (PS=X000); for other paragraph
-#  segments the wrap boundary is approximate, because the true segment base is
-#  not available at decode time (same limitation as x86-16-real).
-rel8:  reloc is simm8   [ reloc = ((inst_next >> 16) << 16) | ((inst_next + simm8) & 0xFFFF); ]  { export *[ram]:4 reloc; }
-rel16: reloc is simm16  [ reloc = ((inst_next >> 16) << 16) | ((inst_next + simm16) & 0xFFFF); ] { export *[ram]:4 reloc; }
+#  inst_next is the linear address of the next instruction.
+#  - PS known (psknown=1, see vseries_registers.sinc): exact,
+#      (psbase<<4) + ((inst_next - (psbase<<4) + disp) & 0xFFFF), masked to 20 bits.
+#  - PS unknown (psknown=0): wrap the low 16 bits of the linear address and keep
+#    the segment-page bits, ((inst_next>>16)<<16) | ((inst_next+disp) & 0xFFFF).
+#    Exact for 64K-aligned segments (PS=X000); for other paragraph segments the
+#    target is wrong whenever the true wrap point differs (same limitation as
+#    x86-16-real).
+rel8:  reloc is psknown=0 & simm8   [ reloc = ((inst_next >> 16) << 16) | ((inst_next + simm8) & 0xFFFF); ]  { export *[ram]:4 reloc; }
+rel8:  reloc is psknown=1 & simm8   [ reloc = ((psbase << 4) + ((inst_next - (psbase << 4) + simm8) & 0xFFFF)) & 0xFFFFF; ]  { export *[ram]:4 reloc; }
+rel16: reloc is psknown=0 & simm16  [ reloc = ((inst_next >> 16) << 16) | ((inst_next + simm16) & 0xFFFF); ] { export *[ram]:4 reloc; }
+rel16: reloc is psknown=1 & simm16  [ reloc = ((psbase << 4) + ((inst_next - (psbase << 4) + simm16) & 0xFFFF)) & 0xFFFFF; ] { export *[ram]:4 reloc; }
 
 # Far pointer  offset:segment  (offset word first, then segment word).  The
 # physical target is masked to 20 bits: the V-Series has a 20-bit address bus,
 # so (segment<<4)+offset wraps at 1M (e.g. FFFF:0020 -> phys 0x00010).
-farptr: reloc is imm16 ; j16  [ reloc = (j16 * 0x10 + imm16) & 0xFFFFF; ]  { PS = j16; export *[ram]:4 reloc; }
+# farptr also records the new PS at the target (psbase/psknown), so near
+# branches disassembled from there wrap in the right segment.  The commit is
+# made here, where the segment field j16 is visible: a constructor's context
+# actions run before those of its operands, and globalset captures the value
+# at the moment it executes.  fartarget is the same two words, exporting the
+# target address for globalset.
+fartarget: reloc is imm16 ; j16  [ reloc = (j16 * 0x10 + imm16) & 0xFFFFF; ]  { export *[ram]:4 reloc; }
+farptr: fartarget is (imm16 ; j16) & fartarget
+    [ psbase = j16; psknown = 1; globalset(fartarget, psbase); globalset(fartarget, psknown); ]
+    { PS = j16; export fartarget; }
 
 # Direct-addressed accumulator memory operand (moffs), segment default DS0.
 moffs8:  seg16^"[" imm16 "]"  is seg16 & imm16  { local p:4 = segment(seg16, imm16:2); export *:1 p; }
@@ -197,9 +213,11 @@ dseSI2: seg16^"[IX]"  is seg16    { local p:4 = segment(seg16,IX); IX = IX + 2 -
 eseDI1: "DS1:[IY]"     is epsilon  { local p:4 = segment(DS1,IY); IY = IY + 1 - 2*zext(DIR); export *:1 p; }
 eseDI2: "DS1:[IY]"     is epsilon  { local p:4 = segment(DS1,IY); IY = IY + 2 - 4*zext(DIR); export *:2 p; }
 
-# Repeat-prefix helpers.  In NEC assembler form the repeat prefix is a leading
-# mnemonic word (REP / REPE / REPNE) that precedes the block op, e.g.
-# "REP MOVBKW" (uPD70216 data book p.62).  SLEIGH always treats the FIRST print
+# Repeat-prefix helpers.  NEC lists the repeat prefixes (REPC, REPNC, REP/REPE/
+# REPZ, REPNE/REPNZ) as one-byte instructions of their own (uPD70116 data sheet
+# p.3.87); written in the same line as the block op they modify, e.g.
+# "REP MOVBKW", as MAME's NEC disassembler (necdasm.cpp) and the Macro Assembler
+# AS ("rep movsw") do.  SLEIGH always treats the FIRST print
 # piece of a constructor as the literal mnemonic, so the leading prefix word must
 # be a literal too -- hence the block ops below use explicit per-prefix
 # constructor variants ("MOVBKW" / "REP MOVBKW" / ...) rather than a leading
@@ -486,42 +504,75 @@ ioP8: imm8 is imm8 { export *[const]:2 imm8; }
 # ==========================================================================
 #  Block transfer (string) - MOVBK/CMPBK/CMPM/LDM/STM
 # ==========================================================================
+# Prefix selection used by every block op (MOVBK/STM/LDM/CMPBK/CMPM here,
+# INM/OUTM in vseries_80186.sinc):
+#   no prefix               rep=0 & repne=0 & repc=0 & repnc=0
+#   REP / REPE / REPNE      rep / repne   (F3 / F2)
+#   REPC                    rep=0 & repne=0 & repc=1            (65)
+#   REPNC                   rep=0 & repne=0 & repc=0 & repnc=1  (64)
+# REPC/REPNC repeat "the following primitive block transfer instruction until the
+# CY flag becomes cleared [REPC] / set [REPNC] or the CW register becomes zero"
+# (uPD70116 data sheet p.3.81).  CY is tested after each element, as in MAME
+# (necinstr.hxx do_repc/do_repnc), which applies them to all block ops incl.
+# INM/OUTM.
+
 # MOVBK (block move, DS0:IX -> DS1:IY).  REP/REPNE both act as an unconditional
 # CW-counted repeat here (NEC pairs REPNE only with CMPBK/CMPM, but a stray F2
 # must still decode); both display as "REP".
-:"MOVBKB" eseDI1,dseSI1     is rep=0 & repne=0 & byte=0xa4 & eseDI1 & dseSI1 { build eseDI1; build dseSI1; eseDI1 = dseSI1; }
-:"MOVBKW" eseDI2,dseSI2     is rep=0 & repne=0 & byte=0xa5 & eseDI2 & dseSI2 { build eseDI2; build dseSI2; eseDI2 = dseSI2; }
-:"REP MOVBKB" eseDI1,dseSI1 is (rep=1 | repne=1) & byte=0xa4 & eseDI1 & dseSI1 { repEntry(); build eseDI1; build dseSI1; eseDI1 = dseSI1; goto inst_start; }
-:"REP MOVBKW" eseDI2,dseSI2 is (rep=1 | repne=1) & byte=0xa5 & eseDI2 & dseSI2 { repEntry(); build eseDI2; build dseSI2; eseDI2 = dseSI2; goto inst_start; }
+:"MOVBKB" eseDI1,dseSI1       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xa4 & eseDI1 & dseSI1 { build eseDI1; build dseSI1; eseDI1 = dseSI1; }
+:"MOVBKW" eseDI2,dseSI2       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xa5 & eseDI2 & dseSI2 { build eseDI2; build dseSI2; eseDI2 = dseSI2; }
+:"REP MOVBKB" eseDI1,dseSI1   is (rep=1 | repne=1) & byte=0xa4 & eseDI1 & dseSI1 { repEntry(); build eseDI1; build dseSI1; eseDI1 = dseSI1; goto inst_start; }
+:"REP MOVBKW" eseDI2,dseSI2   is (rep=1 | repne=1) & byte=0xa5 & eseDI2 & dseSI2 { repEntry(); build eseDI2; build dseSI2; eseDI2 = dseSI2; goto inst_start; }
+:"REPC MOVBKB" eseDI1,dseSI1  is rep=0 & repne=0 & repc=1 & byte=0xa4 & eseDI1 & dseSI1 { repEntry(); build eseDI1; build dseSI1; eseDI1 = dseSI1; if (CY!=0) goto inst_start; }
+:"REPC MOVBKW" eseDI2,dseSI2  is rep=0 & repne=0 & repc=1 & byte=0xa5 & eseDI2 & dseSI2 { repEntry(); build eseDI2; build dseSI2; eseDI2 = dseSI2; if (CY!=0) goto inst_start; }
+:"REPNC MOVBKB" eseDI1,dseSI1 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xa4 & eseDI1 & dseSI1 { repEntry(); build eseDI1; build dseSI1; eseDI1 = dseSI1; if (CY==0) goto inst_start; }
+:"REPNC MOVBKW" eseDI2,dseSI2 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xa5 & eseDI2 & dseSI2 { repEntry(); build eseDI2; build dseSI2; eseDI2 = dseSI2; if (CY==0) goto inst_start; }
 
 # STM (store block, AL/AW -> DS1:IY).
-:"STMB" eseDI1     is rep=0 & repne=0 & byte=0xaa & eseDI1 { build eseDI1; eseDI1 = AL; }
-:"STMW" eseDI2     is rep=0 & repne=0 & byte=0xab & eseDI2 { build eseDI2; eseDI2 = AW; }
-:"REP STMB" eseDI1 is (rep=1 | repne=1) & byte=0xaa & eseDI1 { repEntry(); build eseDI1; eseDI1 = AL; goto inst_start; }
-:"REP STMW" eseDI2 is (rep=1 | repne=1) & byte=0xab & eseDI2 { repEntry(); build eseDI2; eseDI2 = AW; goto inst_start; }
+:"STMB" eseDI1       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xaa & eseDI1 { build eseDI1; eseDI1 = AL; }
+:"STMW" eseDI2       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xab & eseDI2 { build eseDI2; eseDI2 = AW; }
+:"REP STMB" eseDI1   is (rep=1 | repne=1) & byte=0xaa & eseDI1 { repEntry(); build eseDI1; eseDI1 = AL; goto inst_start; }
+:"REP STMW" eseDI2   is (rep=1 | repne=1) & byte=0xab & eseDI2 { repEntry(); build eseDI2; eseDI2 = AW; goto inst_start; }
+:"REPC STMB" eseDI1  is rep=0 & repne=0 & repc=1 & byte=0xaa & eseDI1 { repEntry(); build eseDI1; eseDI1 = AL; if (CY!=0) goto inst_start; }
+:"REPC STMW" eseDI2  is rep=0 & repne=0 & repc=1 & byte=0xab & eseDI2 { repEntry(); build eseDI2; eseDI2 = AW; if (CY!=0) goto inst_start; }
+:"REPNC STMB" eseDI1 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xaa & eseDI1 { repEntry(); build eseDI1; eseDI1 = AL; if (CY==0) goto inst_start; }
+:"REPNC STMW" eseDI2 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xab & eseDI2 { repEntry(); build eseDI2; eseDI2 = AW; if (CY==0) goto inst_start; }
 
 # LDM (load block, DS0:IX -> AL/AW).
-:"LDMB" dseSI1     is rep=0 & repne=0 & byte=0xac & dseSI1 { build dseSI1; AL = dseSI1; }
-:"LDMW" dseSI2     is rep=0 & repne=0 & byte=0xad & dseSI2 { build dseSI2; AW = dseSI2; }
-:"REP LDMB" dseSI1 is (rep=1 | repne=1) & byte=0xac & dseSI1 { repEntry(); build dseSI1; AL = dseSI1; goto inst_start; }
-:"REP LDMW" dseSI2 is (rep=1 | repne=1) & byte=0xad & dseSI2 { repEntry(); build dseSI2; AW = dseSI2; goto inst_start; }
+:"LDMB" dseSI1       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xac & dseSI1 { build dseSI1; AL = dseSI1; }
+:"LDMW" dseSI2       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xad & dseSI2 { build dseSI2; AW = dseSI2; }
+:"REP LDMB" dseSI1   is (rep=1 | repne=1) & byte=0xac & dseSI1 { repEntry(); build dseSI1; AL = dseSI1; goto inst_start; }
+:"REP LDMW" dseSI2   is (rep=1 | repne=1) & byte=0xad & dseSI2 { repEntry(); build dseSI2; AW = dseSI2; goto inst_start; }
+:"REPC LDMB" dseSI1  is rep=0 & repne=0 & repc=1 & byte=0xac & dseSI1 { repEntry(); build dseSI1; AL = dseSI1; if (CY!=0) goto inst_start; }
+:"REPC LDMW" dseSI2  is rep=0 & repne=0 & repc=1 & byte=0xad & dseSI2 { repEntry(); build dseSI2; AW = dseSI2; if (CY!=0) goto inst_start; }
+:"REPNC LDMB" dseSI1 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xac & dseSI1 { repEntry(); build dseSI1; AL = dseSI1; if (CY==0) goto inst_start; }
+:"REPNC LDMW" dseSI2 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xad & dseSI2 { repEntry(); build dseSI2; AW = dseSI2; if (CY==0) goto inst_start; }
 
 # CMPBK (compare block, DS0:IX vs DS1:IY).  REPE (F3) repeats while equal;
 # REPNE (F2) repeats while not equal -- both terminate early on the Z flag.
-:"CMPBKB" dseSI1,eseDI1       is rep=0 & repne=0 & byte=0xa6 & dseSI1 & eseDI1 { build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); }
-:"CMPBKW" dseSI2,eseDI2       is rep=0 & repne=0 & byte=0xa7 & dseSI2 & eseDI2 { build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); }
+:"CMPBKB" dseSI1,eseDI1       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xa6 & dseSI1 & eseDI1 { build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); }
+:"CMPBKW" dseSI2,eseDI2       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xa7 & dseSI2 & eseDI2 { build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); }
 :"REPE CMPBKB" dseSI1,eseDI1  is rep=1 & byte=0xa6 & dseSI1 & eseDI1 { repEntry(); build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); if (Z!=0) goto inst_start; }
 :"REPE CMPBKW" dseSI2,eseDI2  is rep=1 & byte=0xa7 & dseSI2 & eseDI2 { repEntry(); build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); if (Z!=0) goto inst_start; }
 :"REPNE CMPBKB" dseSI1,eseDI1 is rep=0 & repne=1 & byte=0xa6 & dseSI1 & eseDI1 { repEntry(); build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); if (Z==0) goto inst_start; }
 :"REPNE CMPBKW" dseSI2,eseDI2 is rep=0 & repne=1 & byte=0xa7 & dseSI2 & eseDI2 { repEntry(); build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); if (Z==0) goto inst_start; }
+# REPC (65) repeats while CY=1, REPNC (64) while CY=0 (see the prefix notes above).
+:"REPC CMPBKB" dseSI1,eseDI1  is rep=0 & repne=0 & repc=1 & byte=0xa6 & dseSI1 & eseDI1 { repEntry(); build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); if (CY!=0) goto inst_start; }
+:"REPC CMPBKW" dseSI2,eseDI2  is rep=0 & repne=0 & repc=1 & byte=0xa7 & dseSI2 & eseDI2 { repEntry(); build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); if (CY!=0) goto inst_start; }
+:"REPNC CMPBKB" dseSI1,eseDI1 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xa6 & dseSI1 & eseDI1 { repEntry(); build dseSI1; build eseDI1; local s:1 = dseSI1; local d:1 = eseDI1; doCMP(s,d); if (CY==0) goto inst_start; }
+:"REPNC CMPBKW" dseSI2,eseDI2 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xa7 & dseSI2 & eseDI2 { repEntry(); build dseSI2; build eseDI2; local s:2 = dseSI2; local d:2 = eseDI2; doCMP(s,d); if (CY==0) goto inst_start; }
 
 # CMPM (compare block against AL/AW, i.e. Intel SCAS).
-:"CMPMB" eseDI1       is rep=0 & repne=0 & byte=0xae & eseDI1 { build eseDI1; local d:1 = eseDI1; doCMP(AL,d); }
-:"CMPMW" eseDI2       is rep=0 & repne=0 & byte=0xaf & eseDI2 { build eseDI2; local d:2 = eseDI2; doCMP(AW,d); }
+:"CMPMB" eseDI1       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xae & eseDI1 { build eseDI1; local d:1 = eseDI1; doCMP(AL,d); }
+:"CMPMW" eseDI2       is rep=0 & repne=0 & repc=0 & repnc=0 & byte=0xaf & eseDI2 { build eseDI2; local d:2 = eseDI2; doCMP(AW,d); }
 :"REPE CMPMB" eseDI1  is rep=1 & byte=0xae & eseDI1 { repEntry(); build eseDI1; local d:1 = eseDI1; doCMP(AL,d); if (Z!=0) goto inst_start; }
 :"REPE CMPMW" eseDI2  is rep=1 & byte=0xaf & eseDI2 { repEntry(); build eseDI2; local d:2 = eseDI2; doCMP(AW,d); if (Z!=0) goto inst_start; }
 :"REPNE CMPMB" eseDI1 is rep=0 & repne=1 & byte=0xae & eseDI1 { repEntry(); build eseDI1; local d:1 = eseDI1; doCMP(AL,d); if (Z==0) goto inst_start; }
 :"REPNE CMPMW" eseDI2 is rep=0 & repne=1 & byte=0xaf & eseDI2 { repEntry(); build eseDI2; local d:2 = eseDI2; doCMP(AW,d); if (Z==0) goto inst_start; }
+:"REPC CMPMB" eseDI1  is rep=0 & repne=0 & repc=1 & byte=0xae & eseDI1 { repEntry(); build eseDI1; local d:1 = eseDI1; doCMP(AL,d); if (CY!=0) goto inst_start; }
+:"REPC CMPMW" eseDI2  is rep=0 & repne=0 & repc=1 & byte=0xaf & eseDI2 { repEntry(); build eseDI2; local d:2 = eseDI2; doCMP(AW,d); if (CY!=0) goto inst_start; }
+:"REPNC CMPMB" eseDI1 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xae & eseDI1 { repEntry(); build eseDI1; local d:1 = eseDI1; doCMP(AL,d); if (CY==0) goto inst_start; }
+:"REPNC CMPMW" eseDI2 is rep=0 & repne=0 & repc=0 & repnc=1 & byte=0xaf & eseDI2 { repEntry(); build eseDI2; local d:2 = eseDI2; doCMP(AW,d); if (CY==0) goto inst_start; }
 
 # ==========================================================================
 #  Control transfer - BR (JMP) / CALL / RET
@@ -619,11 +670,21 @@ macro doINT(vector) {
 :NOP     is byte=0x90 { }                           # NOP (XCH AW,AW); more specific than XCH so wins for 0x90
 :HALT    is byte=0xf4 { halt(); }                   # HLT
 :POLL    is byte=0x9b { poll(); }                   # WAIT/FWAIT
-:FPO2 rm8 is byte=0xd8; rm8 ... { fpu_op(); }       # coprocessor escape (no FPU modeled)
-:FPO2 rm8 is byte=0xd9; rm8 ... { fpu_op(); }
-:FPO2 rm8 is byte=0xda; rm8 ... { fpu_op(); }
-:FPO2 rm8 is byte=0xdb; rm8 ... { fpu_op(); }
-:FPO2 rm8 is byte=0xdc; rm8 ... { fpu_op(); }
-:FPO2 rm8 is byte=0xdd; rm8 ... { fpu_op(); }
-:FPO2 rm8 is byte=0xde; rm8 ... { fpu_op(); }
-:FPO2 rm8 is byte=0xdf; rm8 ... { fpu_op(); }
+# Coprocessor escapes (no FPU modeled), encodings per uPD70116 data sheet p.3.94:
+#   FPO1  11011XXX  11YYYZZZ         -> FPO1 fp_op,reg8   fp_op = XXXYYY (6 bits)
+#   FPO1  11011XXX  modYYYmem        -> FPO1 fp_op,mem    fp_op = XXXYYY (6 bits)
+#   FPO2  0110011X  11YYYZZZ         -> FPO2 fp_op,reg8   fp_op = XYYY   (4 bits)
+#   FPO2  0110011X  modYYYmem        -> FPO2 fp_op,mem    fp_op = XYYY   (4 bits)
+# fp_op is the same in both forms; in the register form ZZZ is shown as an 8-bit
+# register name.  This matches the Macro Assembler AS ("fpo2 12,ch" = 67 E5,
+# code86.c DecodeFPO2), so the listing can be re-assembled.  AS has no FPO1;
+# its form is chosen by analogy.
+# (Intel: D8-DF = ESC; 66/67 are not used by the 8086.)
+:FPO1 fpop,Rmr8  is hinyb=0xd & page=1 & reg8_op; mod=3 & reg_opcode & Rmr8
+                    [ fpop = (reg8_op << 3) | reg_opcode; ] { fpu_op(); }
+:FPO1 fpop,Mem16 is hinyb=0xd & page=1 & reg8_op; Mem16 & reg_opcode ...
+                    [ fpop = (reg8_op << 3) | reg_opcode; ] { fpu_op(Mem16); }
+:FPO2 fpop,Rmr8  is hinyb=0x6 & page=0 & reg8_op>=6 & wbit; mod=3 & reg_opcode & Rmr8
+                    [ fpop = (wbit << 3) | reg_opcode; ] { fpu_op(); }
+:FPO2 fpop,Mem16 is hinyb=0x6 & page=0 & reg8_op>=6 & wbit; Mem16 & reg_opcode ...
+                    [ fpop = (wbit << 3) | reg_opcode; ] { fpu_op(Mem16); }

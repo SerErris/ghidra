@@ -18,16 +18,22 @@ package ghidra.program.model.lang;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.math.BigInteger;
+
 import org.junit.*;
 
+import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.PseudoInstruction;
 import ghidra.program.database.ProgramBuilder;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
+import ghidra.util.task.TaskMonitor;
 
 /**
  * Instruction-decode coverage for the NEC V-Series (V50 variant): the 8086
@@ -135,7 +141,7 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 		assertDisassembly("08c3", "OR BL,AL");
 		assertDisassembly("30c3", "XOR BL,AL");
 		assertDisassembly("a812", "TEST AL,0x12");
-		assertDisassembly("f00007", "ADD byte ptr [BW],AL");
+		assertDisassembly("f00007", "BUSLOCK ADD byte ptr [BW],AL");
 	}
 
 	@Test
@@ -174,9 +180,52 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 		assertDisassembly("ae", "CMPMB DS1:[IY]");
 		assertDisassembly("ac", "LDMB [IX]");
 		assertDisassembly("aa", "STMB DS1:[IY]");
-		// REPNC (64) / REPC (65) prefix bytes are consumed but not displayed.
-		assertDisassembly("64a6", "CMPBKB [IX],DS1:[IY]");
-		assertDisassembly("65a7", "CMPBKW [IX],DS1:[IY]");
+		// REPNC (64) / REPC (65) repeat any primitive block transfer while CY=0 /
+		// CY=1 and are shown as a leading mnemonic word.
+		assertDisassembly("64a6", "REPNC CMPBKB [IX],DS1:[IY]");
+		assertDisassembly("65a7", "REPC CMPBKW [IX],DS1:[IY]");
+		assertDisassembly("64ae", "REPNC CMPMB DS1:[IY]");
+		assertDisassembly("65af", "REPC CMPMW DS1:[IY]");
+		assertDisassembly("6564a6", "REPC CMPBKB [IX],DS1:[IY]");
+		assertDisassembly("64a4", "REPNC MOVBKB DS1:[IY],[IX]");
+		assertDisassembly("65a5", "REPC MOVBKW DS1:[IY],[IX]");
+		assertDisassembly("65aa", "REPC STMB DS1:[IY]");
+		assertDisassembly("64ab", "REPNC STMW DS1:[IY]");
+		assertDisassembly("65ac", "REPC LDMB [IX]");
+		assertDisassembly("64ad", "REPNC LDMW [IX]");
+	}
+
+	@Test
+	public void test_busLockAndFpo() throws Exception {
+		// BUSLOCK (F0) is shown as a leading word; D8-DF are FPO1 and 66/67 FPO2
+		// (coprocessor escapes) with the operation number and an r/m operand.
+		assertDisassembly("f08607", "BUSLOCK XCH byte ptr [BW],AL");
+		assertDisassembly("f02efe07", "BUSLOCK INC byte ptr PS:[BW]");
+		assertDisassembly("d807", "FPO1 0x0,[BW]");
+		assertDisassembly("d9c1", "FPO1 0x8,CL");
+		assertDisassembly("dc8e3412", "FPO1 0x21,[BP + 0x1234]");
+		assertDisassembly("670f", "FPO2 0x9,[BW]");
+		assertDisassembly("67ff", "FPO2 0xf,BH");
+	}
+
+	@Test
+	public void test_asReference() throws Exception {
+		// Encodings cross-checked against the Macro Assembler AS V30 reference
+		// binary (tests/t_v30/t_v30.ori) and MAME's NEC disassembler.
+		assertDisassembly("0f31df", "INS BH,BL");
+		assertDisassembly("0f39c707", "INS BH,0x7");
+		assertDisassembly("0f33df", "EXT BH,BL");
+		assertDisassembly("0f3bc707", "EXT BH,0x7");
+		assertDisassembly("0f284712", "ROL4 byte ptr [BW + 0x12]");
+		assertDisassembly("0f19050a", "TEST1 word ptr [IY],0xa");
+		assertDisassembly("f5", "NOT1 CY");
+		assertDisassembly("67e0", "FPO2 0xc,AL");
+		assertDisassembly("67e5", "FPO2 0xc,CH");
+		assertDisassembly("6727", "FPO2 0xc,[BW]");
+		assertDisassembly("67263412", "FPO2 0xc,[0x1234]");
+		assertDisassembly("0fff23", "BRKEM 0x23");
+		assertDisassembly("65a6", "REPC CMPBKB [IX],DS1:[IY]");
+		assertDisassembly("64a7", "REPNC CMPBKW [IX],DS1:[IY]");
 	}
 
 	@Test
@@ -199,6 +248,13 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 		assertDisassembly("6d", "INMW DS1:[IY],DW");
 		assertDisassembly("6e", "OUTMB DW,[IX]");
 		assertDisassembly("6f", "OUTMW DW,[IX]");
+		// A repeat prefix makes INM/OUTM loop CW times (REPC/REPNC also apply).
+		assertDisassembly("f36c", "REP INMB DS1:[IY],DW");
+		assertDisassembly("f36d", "REP INMW DS1:[IY],DW");
+		assertDisassembly("f36e", "REP OUTMB DW,[IX]");
+		assertDisassembly("f36f", "REP OUTMW DW,[IX]");
+		assertDisassembly("656c", "REPC INMB DS1:[IY],DW");
+		assertDisassembly("646f", "REPNC OUTMW DW,[IX]");
 	}
 
 	@Test
@@ -261,6 +317,65 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 			}
 		}
 		assertTrue("first push must store the caller's old PS", fromOldPs);
+	}
+
+	private void setCodeSegment(String start, String end, int ps) throws Exception {
+		AddressFactory af = program.getAddressFactory();
+		ProgramContext ctx = program.getProgramContext();
+		Address s = af.getAddress(start);
+		Address e = af.getAddress(end);
+		ctx.setValue(program.getRegister("psknown"), s, e, BigInteger.ONE);
+		ctx.setValue(program.getRegister("psbase"), s, e, BigInteger.valueOf(ps));
+	}
+
+	/**
+	 * Near relative targets wrap inside the code segment PS, not inside the 64K
+	 * page of the linear address.  Case from a real ROM: CALL at phys 0xC66E3
+	 * running under PS=C1A0 reaches phys 0xD03A9; without a known PS the target
+	 * wraps inside page 0xC0000.
+	 */
+	@Test
+	public void test_nearCallWrapsInKnownSegment() throws Exception {
+		programBuilder.createMemory(".seg", "c000:6000", 0x1000).setExecute(true);
+		programBuilder.setBytes("c000:66e3", "e8c39c");
+		Address a = program.getAddressFactory().getAddress("c000:66e3");
+
+		assertEquals("CALL 0xc000:03a9", disassembler.disassemble(a).toString());
+
+		setCodeSegment("c000:6000", "c000:6fff", 0xC1A0);
+		PseudoDisassembler withPs = new PseudoDisassembler(program);
+		assertEquals("CALL 0xd000:03a9", withPs.disassemble(a).toString());
+	}
+
+	/**
+	 * A short branch whose linear target crosses a 64K page boundary stays in
+	 * the same segment: PS=C1A0, BR $+0x12 at phys 0xCFFFE reaches phys 0xD0010.
+	 */
+	@Test
+	public void test_shortBranchAcrossPageInKnownSegment() throws Exception {
+		programBuilder.createMemory(".seg", "c000:f000", 0x1000).setExecute(true);
+		programBuilder.setBytes("c000:fffe", "eb10");
+		setCodeSegment("c000:f000", "c000:ffff", 0xC1A0);
+		Address a = program.getAddressFactory().getAddress("c000:fffe");
+		assertEquals("BR 0xd000:0010", new PseudoDisassembler(program).disassemble(a).toString());
+	}
+
+	/**
+	 * A far CALL records the new PS at its target, so code disassembled from
+	 * there resolves near branches in the right segment.
+	 */
+	@Test
+	public void test_farCallSetsSegmentContextAtTarget() throws Exception {
+		programBuilder.setBytes(ADDR, "9a000180b0"); // CALL FAR B080:0100 -> phys 0xB0900
+		Address a = program.getAddressFactory().getAddress(ADDR);
+		new DisassembleCommand(a, null, true).applyTo(program, TaskMonitor.DUMMY);
+
+		Address target = program.getAddressFactory().getAddress("b000:0900");
+		ProgramContext ctx = program.getProgramContext();
+		assertEquals(BigInteger.ONE, ctx.getValue(program.getRegister("psknown"), target, false));
+		assertEquals(BigInteger.valueOf(0xB080),
+			ctx.getValue(program.getRegister("psbase"), target, false));
+		assertEquals("CALL 0xb000:0900", program.getListing().getInstructionAt(a).toString());
 	}
 
 	@Test
@@ -337,8 +452,8 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 
 	@Test
 	public void test_necBitField() throws Exception {
-		assertDisassembly("0f31c1", "INS AL,CL");
-		assertDisassembly("0f33c1", "EXT AL,CL");
+		assertDisassembly("0f31c1", "INS CL,AL");
+		assertDisassembly("0f33c1", "EXT CL,AL");
 		assertDisassembly("0f39c105", "INS CL,0x5");
 		assertDisassembly("0f3bc105", "EXT CL,0x5");
 	}

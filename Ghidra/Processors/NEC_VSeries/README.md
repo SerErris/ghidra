@@ -62,24 +62,61 @@ a flat 20-bit linear space (4-byte `ram` addresses), so:
   architectural 16-bit `PC`. The extra width is a Ghidra modeling requirement —
   the silicon has only the 16-bit `PC` (Intel models the same thing as
   `EIP`/`IP`).
-- Near relative branches wrap the offset within the 64 K segment; the physical
-  address wraps at 1 MB (20-bit address bus). Both are modeled. Exact wrap for
-  non-64K-aligned code segments is approximate (the runtime segment base is not
-  available at decode time — the same limitation as `x86-16-real`).
+- Near relative branches wrap the offset within the 64 K code segment; the
+  physical address wraps at 1 MB (20-bit address bus). Both are modeled. The
+  code segment is not part of the instruction bytes, so it is carried in two
+  flowing context fields: `psknown` and `psbase` (the PS paragraph).
+  - With `psknown=1` the target is exact:
+    `(psbase << 4) + ((pc_next - (psbase << 4) + disp) & 0xFFFF)`.
+  - Far `CALL`/`BR` (`9A`/`EA`) set both fields at their target, so code reached
+    through a far transfer (e.g. the reset vector `BR far B000:0000`) and
+    everything disassembled from it by near flow gets the right segment.
+    For code reached otherwise (interrupt vectors, far pointers in tables),
+    set the fields for the address range with *Set Register Values*.
+  - With `psknown=0` (the default) the offset wraps inside the 64 K page of the
+    linear address. This is exact for 64K-aligned segments (`PS=X000`) and
+    wrong for other segments whenever the true wrap point differs — the same
+    limitation as `x86-16-real`. Example: under `PS=C1A0`, `E8 C3 9C` at linear
+    `0xC66E3` reaches `0xD03A9`, not `0xC03A9`.
 
 ## Instruction layers
 
-- `vseries_8086.sinc` — the full 8086 base instruction set + p-code.
+- `vseries_8086.sinc` — the instructions the V-Series shares with the 8086
+  (in NEC mnemonics), incl. all prefixes (segment override, `REP`/`REPE`/
+  `REPNE`, `REPC`/`REPNC`, `BUSLOCK`), the block ops and `FPO1`/`FPO2`.
 - `vseries_80186.sinc` — the 80186 additions, NEC mnemonics primary
   (`PREPARE`=ENTER, `DISPOSE`=LEAVE, `PUSH R`=PUSHA, `POP R`=POPA, 3-operand
   `MUL`=IMUL, `CHKIND`=BOUND, `INM`=INS, `OUTM`=OUTS, shifts/rotates by imm8).
 - `vseries_nec.sinc` — the NEC-exclusive instructions (common to all four
   parts): bit ops `TEST1`/`CLR1`/`SET1`/`NOT1` (bit from CL or imm8), packed-BCD
   string `ADD4S`/`SUB4S`/`CMP4S`, nibble rotate `ROL4`/`ROR4`, bit-field
-  `INS`/`EXT`, the `REPC`/`REPNC` prefixes, and the 8080-mode switches.
+  `INS`/`EXT`, and the 8080-mode switches.
 
 NEC mnemonics are primary throughout (e.g. `BR`=JMP, `Bcc`=Jcc, `MOVBK`=MOVS,
 `ADDC`=ADC, `SHRA`=SAR); the Intel alias is given in a comment.
+
+Block ops carry a B/W size suffix (`MOVBKB`/`MOVBKW`, `CMPBKB`, `CMPMB`,
+`LDMB`, `STMB`, `INMB`, `OUTMB` …) as in MAME's NEC disassembler; the µPD70116
+data sheet writes the operand form (`MOVBK dst,src`, `INM dst,DW`).
+
+Prefixes, bit fields and coprocessor escapes (µPD70116 data sheet, cross-checked
+against the Macro Assembler AS test `tests/t_v30` and MAME `necinstr.hxx`):
+
+- Repeat prefixes are shown as a leading word on the block op, e.g.
+  `REP MOVBKW`, `REPE CMPBKB`, `REP INMB` (MAME and AS write them in the same
+  line). `REP`/`REPNE` on `MOVBK`/`STM`/`LDM`/`INM`/`OUTM` repeat CW times.
+- `REPC` (65h) / `REPNC` (64h) work on every primitive block transfer instruction
+  (`MOVBK`, `CMPBK`, `CMPM`, `LDM`, `STM`, `INM`, `OUTM`) and repeat while
+  CY=1 / CY=0 and CW≠0, CY tested after each element (data sheet p.3.81; MAME).
+- `BUSLOCK` (F0h, Intel LOCK) is shown as a leading word, e.g.
+  `BUSLOCK XCH byte ptr [BW],AL`.
+- `INS`/`EXT reg8,reg8`: first operand = bit-offset register in the ModRM r/m
+  field, second = length in the reg field (as AS and MAME encode it). The offset
+  is a bit number 0–15 within the word at IX/IY; afterwards it holds
+  (offset+length) & 15 and IX/IY advance by 2 if the field reached the next word.
+- `FPO1` = D8h–DFh (Intel ESC), `FPO2` = 66h/67h. `fp_op` = XXX·YYY (FPO1) or
+  X·YYY (FPO2), followed by the memory operand or, in the register form, ZZZ as
+  an 8-bit register name — AS syntax, e.g. `FPO2 0xc,CH` = `67 E5`.
 
 ## I/O and on-chip peripheral SFRs (V40/V50)
 
@@ -89,6 +126,11 @@ provided as named symbols via the per-variant `.pspec` `default_symbols`:
 `OPHA`, `OPSEL`, `OPCN`, `DULA`, `IULA`, `TULA`, `SULA`, `WCY1`, `WCY2`, `WMB`,
 `RFC`, `TCKS`. When Ghidra resolves the port value (e.g. `MOV DW,0xFFFC; OUT
 DW,AL`) the access is shown against the register name (`OPHA`).
+
+The `.cspec` declares `io` a global space (as the Z80 module does). Without it
+the decompiler removes `OUT` writes as dead stores and shows `IN` reads as
+unaffected inputs (`in_io_xxxx`). Ports with side effects on read can be marked
+volatile per program with a volatile memory block in the `io` space.
 
 The relocatable DMAU/ICU/TCU/SCU peripheral register blocks are based at the
 firmware-programmed `OPHA` address and so are not given fixed symbols.

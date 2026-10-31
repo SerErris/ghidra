@@ -21,8 +21,12 @@
     <long_double_size value="10"/>
   </data_organization>
 
+  <!-- "io" is global so the decompiler treats IN/OUT transfers as accesses to
+       persistent storage: without it, OUT writes are removed as dead stores
+       and IN reads appear as unaffected inputs (in_io_xxxx). -->
   <global>
     <range space="ram"/>
+    <range space="io"/>
   </global>
   <stackpointer register="SP" space="ram"/>
 

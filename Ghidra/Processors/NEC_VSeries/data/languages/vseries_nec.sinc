@@ -199,16 +199,21 @@ define pcodeop call8080;          # CALLN
 # ==========================================================================
 #  Bit-field insert / extract    0F 31/33 (reg,reg)  0F 39/3B (reg,imm4)
 # --------------------------------------------------------------------------
-#  First operand  = bit-offset register (low 4 bits, 0..15).
-#  Second operand = bit length (register or imm4, low 4 bits: 0->1 bit .. 15->16).
+#  First operand  = bit-offset register, in the ModRM r/m field (low 4 bits,
+#                   0..15 = bit 0..15 of the word at IX/IY).
+#  Second operand = bit length, in the ModRM reg field or imm4 (low 4 bits:
+#                   0 -> 1 bit .. 15 -> 16 bits).
+#  Field assignment as in the Macro Assembler AS (code86.c DecodeINS_EXT: first
+#  operand -> r/m, second -> reg) and MAME (necinstr.hxx 0F 31/33/39/3B).
 #  EXT: AW := field extracted from DS0:IX (Intel DS:SI), right-justified/zero-filled.
 #  INS: field at DS1:IY (Intel ES:DI) := low bits of AW.
-#  A field is up to 16 bits at a 0..15 bit offset, so it spans at most 4 bytes.
-#  After the transfer the byte pointer (IX/IY) and the low 4 bits of the offset
-#  register advance by 'length' bits to the next field.  (The byte-vs-word
-#  granularity of that advance is not fully specified in the data book; the
-#  absolute bit position start+length is preserved either way, so successive
-#  fields extract/insert identically.)
+#  A field is up to 16 bits at a 0..15 bit offset, so it spans at most two
+#  words (4 bytes).  Afterwards the offset register holds (offset+length) & 15
+#  and IX/IY advance by one word (+2) if the field reached or crossed the end of
+#  the first word (offset+length >= 16), word-granular as in the data sheet
+#  ("0 selects bit 0 and 15 selects bit 15 of the word") and in MAME.
+#  Flags: none changed (uPD70116 data sheet; MAME models undocumented V30 flag
+#  side effects, which are not reproduced here).
 # ==========================================================================
 macro extField(base, off, len, out) {
     local data:4 = *[ram]:4 base;
@@ -225,23 +230,23 @@ macro insField(base, off, len, val) {
     *[ram]:4 base = data;
 }
 
-:EXT Reg8,Rmr8 is byte=0x0f; byte=0x33; mod=3 & Reg8 & Rmr8 {
-    local ov:1 = Reg8 & 0x0f;  local off:4 = zext(ov);
-    local lv:1 = Rmr8 & 0x0f;  local len:4 = zext(lv) + 1;
+:EXT Rmr8,Reg8 is byte=0x0f; byte=0x33; mod=3 & Reg8 & Rmr8 {
+    local ov:1 = Rmr8 & 0x0f;  local off:4 = zext(ov);
+    local lv:1 = Reg8 & 0x0f;  local len:4 = zext(lv) + 1;
     local base:4 = segment(DS0, IX);
     local res:4;  extField(base, off, len, res);  AW = res:2;
     local total:4 = off + len;
-    local adv:4 = total >> 3;   IX = IX + adv:2;
-    local no:4 = total & 0x7;   Reg8 = (Reg8 & 0xf0) | no:1;
+    local adv:4 = (total >> 4) * 2;   IX = IX + adv:2;
+    local no:4 = total & 0xf;         Rmr8 = no:1;
 }
-:INS Reg8,Rmr8 is byte=0x0f; byte=0x31; mod=3 & Reg8 & Rmr8 {
-    local ov:1 = Reg8 & 0x0f;  local off:4 = zext(ov);
-    local lv:1 = Rmr8 & 0x0f;  local len:4 = zext(lv) + 1;
+:INS Rmr8,Reg8 is byte=0x0f; byte=0x31; mod=3 & Reg8 & Rmr8 {
+    local ov:1 = Rmr8 & 0x0f;  local off:4 = zext(ov);
+    local lv:1 = Reg8 & 0x0f;  local len:4 = zext(lv) + 1;
     local base:4 = segment(DS1, IY);
     local val:4 = zext(AW);  insField(base, off, len, val);
     local total:4 = off + len;
-    local adv:4 = total >> 3;   IY = IY + adv:2;
-    local no:4 = total & 0x7;   Reg8 = (Reg8 & 0xf0) | no:1;
+    local adv:4 = (total >> 4) * 2;   IY = IY + adv:2;
+    local no:4 = total & 0xf;         Rmr8 = no:1;
 }
 :EXT Rmr8,imm8 is byte=0x0f; byte=0x3b; mod=3 & reg_opcode=0 & Rmr8; imm8 {
     local ov:1 = Rmr8 & 0x0f;  local off:4 = zext(ov);
@@ -249,8 +254,8 @@ macro insField(base, off, len, val) {
     local base:4 = segment(DS0, IX);
     local res:4;  extField(base, off, len, res);  AW = res:2;
     local total:4 = off + len;
-    local adv:4 = total >> 3;   IX = IX + adv:2;
-    local no:4 = total & 0x7;   Rmr8 = (Rmr8 & 0xf0) | no:1;
+    local adv:4 = (total >> 4) * 2;   IX = IX + adv:2;
+    local no:4 = total & 0xf;         Rmr8 = no:1;
 }
 :INS Rmr8,imm8 is byte=0x0f; byte=0x39; mod=3 & reg_opcode=0 & Rmr8; imm8 {
     local ov:1 = Rmr8 & 0x0f;  local off:4 = zext(ov);
@@ -258,8 +263,8 @@ macro insField(base, off, len, val) {
     local base:4 = segment(DS1, IY);
     local val:4 = zext(AW);  insField(base, off, len, val);
     local total:4 = off + len;
-    local adv:4 = total >> 3;   IY = IY + adv:2;
-    local no:4 = total & 0x7;   Rmr8 = (Rmr8 & 0xf0) | no:1;
+    local adv:4 = (total >> 4) * 2;   IY = IY + adv:2;
+    local no:4 = total & 0xf;         Rmr8 = no:1;
 }
 
 # ==========================================================================
