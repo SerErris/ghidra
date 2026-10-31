@@ -268,8 +268,8 @@ public class VSeriesDisassemblyTest extends AbstractGhidraHeadlessIntegrationTes
 		assertDisassembly("ffd3", "CALL BW");
 		assertDisassembly("c3", "RET");
 		assertDisassembly("c20400", "RET 0x4");
-		assertDisassembly("cb", "RET");
-		assertDisassembly("ca0400", "RET 0x4");
+		assertDisassembly("cb", "RETF");
+		assertDisassembly("ca0400", "RETF 0x4");
 	}
 
 	/**

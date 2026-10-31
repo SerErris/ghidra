@@ -603,8 +603,10 @@ ioP8: imm8 is imm8 { export *[const]:2 imm8; }
 
 :RET       is byte=0xc3       { local off:2; pop16(off); local t:4 = segment(PS,off); return [t]; }
 :RET imm16 is byte=0xc2; imm16 { local off:2; pop16(off); SP = SP + imm16; local t:4 = segment(PS,off); return [t]; }
-:RET       is byte=0xcb       { local off:2; pop16(off); pop16(PS); local t:4 = segment(PS,off); return [t]; }          # RETF
-:RET imm16 is byte=0xca; imm16 { local off:2; pop16(off); pop16(PS); SP = SP + imm16; local t:4 = segment(PS,off); return [t]; } # RETF imm16
+# Far returns are displayed as RETF (NEC lists all four forms as RET): the listing must keep near and far apart,
+# and AS (asl -cpu v30) assembles RET to C3h, RETF to CBh.
+:RETF       is byte=0xcb       { local off:2; pop16(off); pop16(PS); local t:4 = segment(PS,off); return [t]; }
+:RETF imm16 is byte=0xca; imm16 { local off:2; pop16(off); pop16(PS); SP = SP + imm16; local t:4 = segment(PS,off); return [t]; }
 
 # ==========================================================================
 #  Conditional branches  (NEC Bcc, Intel Jcc)

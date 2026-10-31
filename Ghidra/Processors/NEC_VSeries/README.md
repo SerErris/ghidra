@@ -108,6 +108,9 @@ against the Macro Assembler AS test `tests/t_v30` and MAME `necinstr.hxx`):
 - `REPC` (65h) / `REPNC` (64h) work on every primitive block transfer instruction
   (`MOVBK`, `CMPBK`, `CMPM`, `LDM`, `STM`, `INM`, `OUTM`) and repeat while
   CY=1 / CY=0 and CW≠0, CY tested after each element (data sheet p.3.81; MAME).
+- Far returns CBh / CAh are shown as `RETF` / `RETF imm16`. The NEC data sheet
+  lists all four return encodings as `RET`; the listing keeps near and far apart,
+  and AS (`asl -cpu v30`) assembles `RET` to C3h and `RETF` to CBh.
 - `BUSLOCK` (F0h, Intel LOCK) is shown as a leading word, e.g.
   `BUSLOCK XCH byte ptr [BW],AL`.
 - `INS`/`EXT reg8,reg8`: first operand = bit-offset register in the ModRM r/m
